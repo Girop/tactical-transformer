@@ -3,9 +3,53 @@ from pathlib import Path
 from typing import Any
 import re
 import argparse
-from transformers import AutoTokenizer
+import torch
+from torch import nn
 
 import z3
+
+
+class ASTTransformer(nn.Module):
+    def __init__(self, vocab_size: int, out_size: int, d_model=256, n_heads=8, n_layers=4, max_len=5_000):
+        super().__init__()
+
+        self.ast_embedding = nn.Embedding(vocab_size, d_model)
+        self.out_embedding = nn.Embedding(out_size, d_model)
+        self.src_pos_embedding = nn.Embedding(max_len, d_model)
+        self.tgt_pos_embedding = nn.Embedding(max_len, d_model)
+
+        self.transformer = nn.Transformer(
+            d_model=d_model,
+            nhead=n_heads,
+            num_encoder_layers=n_layers,
+            num_decoder_layers=n_layers,
+            dim_feedforward=1024,
+            batch_first=True
+        )
+
+        self.out_proj = nn.Linear(d_model, out_size)
+
+
+    def forward(self, src_ids, tgt_ids):
+        src_pos = torch.arange(src_ids.size(1), device=src_ids.device)
+        tgt_pos = torch.arange(tgt_ids.size(1), device=tgt_ids.device)
+
+        src = self.ast_embedding(src_ids) + self.src_pos_embedding(src_pos)
+        tgt = self.out_embedding(tgt_ids) + self.tgt_pos_embedding(tgt_pos)
+
+        tgt_mask = torch.triu(
+            torch.ones(
+                tgt_ids.size(1),
+                tgt_ids.size(1),
+                device=tgt_ids.device,
+                dtype=torch.bool,
+            ),
+            diagonal=1,
+        )
+
+        x = self.transformer(src, tgt, tgt_mask=tgt_mask)
+
+        return self.out_proj(x)
 
 
 class Timer:
@@ -21,19 +65,17 @@ class Timer:
         return round(self.elapsed * 1000, 3)
 
 
-def benchmark(source: str, tactics: list[str], timeout_ms: int = 10_000,) -> dict[str, Any]:
+def run_solver(source: str, tactics: list[str], timeout_ms: int = 10_000) -> dict[str, Any]:
     assertions = z3.parse_smt2_string(source)
 
-    solver = (z3.Tactic(tactics[0]) if len(tactics) == 1 else z3.Then(*tactics)).solver()
+    solver = z3.Then(*tactics).solver()
     solver.set(timeout=timeout_ms)
     solver.add(*assertions)
 
-    with Timer() as t:
-        status = solver.check()
+    status = solver.check()
     stats = solver.statistics()
     return {
         "status": str(status),
-        "elapsed_ms": t.elapsed_ms,
         "statistics": {key: stats.get_key_value(key) for key in stats.keys()},
     }
 
@@ -80,23 +122,35 @@ def get_args() -> argparse.Namespace:
     return args.parse_args()
 
 
-# Design plan - prototype
-# Encoder-Decoder, sequence generation
-# Output: for now flat list of tactics, assumed to be in a single Then(...), later expand on different combinators
-# Input: try out different encoders
-# Training dataset: z3alpha generated tactics, discard complex ones, use only sequences of Then(...) + sat/unsat/unknown 
-# Base model: ???
+def discover_formulations(root: Path = Path("./smtlib/")) -> list[Path]:
+    return list(root.rglob("*.smt2"))
 
 
-def tokenize(source: str) -> list[int]:
-    TOKENIZER_NAME = "google/byt5-small"
-    tokenizer = AutoTokenizer.from_pretrained(TOKENIZER_NAME)
-    return tokenizer(file, padding=True)
+def load_formulations(count: int) -> list[str]:
+    res = []
+    for file in discover_formulations()[:count]:
+        source = file.read_text(encoding="utf-8")
+        assertions = z3.parse_smt2_string(source)
+        ast_text = "\n".join(f"(assert {a.sexpr()})" for a in assertions)
+        res.append(ast_text)
+    return res
+
+
 
 
 if __name__ == '__main__':
-    args = get_args()
-    file = args.smt_file.read_text(encoding="utf-8")
-    input_ids, att = tokenize(file).values()
-    print("Token count: ", sum(att))
-    print("Tokens: ", input_ids)
+    # tokenizer = AutoTokenizer.from_pretrained("tokenizer/smtlib-bpe")
+    problems = load_formulations(50)[10:40]
+
+    # shorter_problems = []
+    # for p in problems:
+    #     res, att = tokenizer(p, padding=True).values()
+    #     if len(res) < 5_000:
+    #         shorter_problems.append(res)
+    # print(len(shorter_problems))
+
+    # with open("data/QFNIA_strats.csv") as fp:
+    #     reader = csv.reader(fp)
+    #     for tactic in set([row[0] for row in reader]):
+    #         print(tactic)
+
