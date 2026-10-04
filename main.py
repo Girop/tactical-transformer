@@ -134,8 +134,3 @@ def load_formulations(count: int) -> list[str]:
         ast_text = "\n".join(f"(assert {a.sexpr()})" for a in assertions)
         res.append(ast_text)
     return res
-
-
-if __name__ == '__main__':
-    problems = load_formulations(50)[10:40]
-

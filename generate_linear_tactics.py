@@ -19,6 +19,7 @@ Output (written under --out-dir/out-<timestamp>/):
 """
 
 import argparse
+import dataclasses
 import datetime
 import logging
 from pathlib import Path
@@ -39,52 +40,22 @@ log = logging.getLogger(__name__)
 
 def get_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--benchmark-dir",
-        required=True,
-        help="Directory of .smt2 files to search over, e.g. smtlib/non-incremental/QF_NIA",
-    )
-    parser.add_argument(
-        "--logic",
-        required=True,
-        help="SMT-LIB logic name; must match a z3alpha/z3alpha/tactics/logic_configs/<LOGIC>.json",
-    )
-    parser.add_argument(
-        "--timeout", type=int, default=10, help="Per-benchmark solver timeout in seconds (default: 10)"
-    )
-    parser.add_argument(
-        "--mcts-sims", type=int, default=200, help="Number of stage-1 MCTS simulations (default: 200)"
-    )
-    parser.add_argument(
-        "--max-ln-strategies",
-        type=int,
-        default=10,
-        help="Number of top linear strategies to shortlist into linear_selected_strategies.csv (default: 10)",
-    )
-    parser.add_argument(
-        "--value-type", default="par10", help="Reward metric for MCTS backup (default: par10)"
-    )
+    parser.add_argument( "--benchmark-dir", required=True, help="Directory of .smt2 files to search over, e.g. smtlib/non-incremental/QF_NIA")
+    parser.add_argument( "--logic", required=True, help="SMT-LIB logic name; must match a z3alpha/z3alpha/tactics/logic_configs/<LOGIC>.json")
+    parser.add_argument( "--timeout", type=int, default=10, help="Per-benchmark solver timeout in seconds (default: 10)")
+    parser.add_argument("--mcts-sims", type=int, default=200, help="Number of stage-1 MCTS simulations (default: 200)")
+    parser.add_argument("--max-ln-strategies", type=int, default=10, help="Number of top linear strategies to shortlist into linear_selected_strategies.csv (default: 10)")
+    parser.add_argument( "--value-type", default="par10", help="Reward metric for MCTS backup (default: par10)")
     parser.add_argument("--c-uct", type=float, default=DEFAULT_C_UCT, help="PUCT exploration constant")
     parser.add_argument("--random-seed", type=int, default=DEFAULT_RANDOM_SEED, help="Random seed")
-    parser.add_argument(
-        "--logic-config-dir",
-        default=None,
-        help="Override directory of tactic/parameter JSON configs (default: z3alpha's built-in configs)",
-    )
-    parser.add_argument(
-        "--out-dir",
-        default="experiments/linear_tactics",
-        help="Parent directory for timestamped output logs/CSVs (default: experiments/linear_tactics)",
-    )
-    parser.add_argument(
-        "--llm-prior",
-        action="store_true",
-        help="Score legal tactics with an LLM as PUCT priors (needs OPENAI_API_KEY)",
-    )
+    parser.add_argument( "--logic-config-dir", default=None, help="Override directory of tactic/parameter JSON configs (default: z3alpha's built-in configs)")
+    parser.add_argument( "--out-dir", default="experiments/linear_tactics", help="Parent directory for timestamped output logs/CSVs (default: experiments/linear_tactics)")
+    parser.add_argument( "--llm-prior", action="store_true", help="Score legal tactics with an LLM as PUCT priors (needs OPENAI_API_KEY)")
     parser.add_argument("--llm-model", default="gpt-5.4-mini")
     parser.add_argument("--llm-base-url", default=None)
     parser.add_argument("--llm-timeout", type=float, default=None)
     parser.add_argument("--llm-temperature", type=float, default=None)
+    parser.add_argument("--workers", type=int, default=None, help="Parallel z3 solver processes (default: 'workers' from z3alpha's env_config.json)")
     parser.add_argument("--log-level", default="INFO")
     return parser.parse_args()
 
@@ -93,6 +64,8 @@ def main() -> None:
     args = get_args()
 
     env = load_env_config()
+    if args.workers is not None:
+        env = dataclasses.replace(env, workers=args.workers)
     check_z3_version(env)
     setup_logging(level=args.log_level)
 
@@ -112,7 +85,8 @@ def main() -> None:
     log_folder = Path(args.out_dir) / f"out-{datetime.datetime.now():%Y-%m-%d_%H-%M-%S}"
     log_folder.mkdir(parents=True)
 
-    _, shortlist = synthesize_linear_strategies(run, log_folder, env=env)
+    b, shortlist = synthesize_linear_strategies(run, log_folder, env=env)
+    print(b)
 
     log.info("Stage-1 linear tactic search complete; results in %s", log_folder)
     for strat, _ in shortlist:
