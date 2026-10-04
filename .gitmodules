@@ -1,0 +1,3 @@
+[submodule "z3alpha"]
+	path = z3alpha
+	url = git@github.com:JohnLyu2/z3alpha.git

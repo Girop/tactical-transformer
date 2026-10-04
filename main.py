@@ -10,7 +10,7 @@ import z3
 
 
 class ASTTransformer(nn.Module):
-    def __init__(self, vocab_size: int, out_size: int, d_model=256, n_heads=8, n_layers=4, max_len=5_000):
+    def __init__(self, vocab_size: int, out_size: int, d_model=256, n_heads=8, n_layers=4, max_len=2_000):
         super().__init__()
 
         self.ast_embedding = nn.Embedding(vocab_size, d_model)
@@ -37,7 +37,7 @@ class ASTTransformer(nn.Module):
         src = self.ast_embedding(src_ids) + self.src_pos_embedding(src_pos)
         tgt = self.out_embedding(tgt_ids) + self.tgt_pos_embedding(tgt_pos)
 
-        tgt_mask = torch.triu(
+        causal_mask = torch.triu(
             torch.ones(
                 tgt_ids.size(1),
                 tgt_ids.size(1),
@@ -47,7 +47,7 @@ class ASTTransformer(nn.Module):
             diagonal=1,
         )
 
-        x = self.transformer(src, tgt, tgt_mask=tgt_mask)
+        x = self.transformer(src, tgt, tgt_mask=causal_mask)
 
         return self.out_proj(x)
 
@@ -136,21 +136,6 @@ def load_formulations(count: int) -> list[str]:
     return res
 
 
-
-
 if __name__ == '__main__':
-    # tokenizer = AutoTokenizer.from_pretrained("tokenizer/smtlib-bpe")
     problems = load_formulations(50)[10:40]
-
-    # shorter_problems = []
-    # for p in problems:
-    #     res, att = tokenizer(p, padding=True).values()
-    #     if len(res) < 5_000:
-    #         shorter_problems.append(res)
-    # print(len(shorter_problems))
-
-    # with open("data/QFNIA_strats.csv") as fp:
-    #     reader = csv.reader(fp)
-    #     for tactic in set([row[0] for row in reader]):
-    #         print(tactic)
 

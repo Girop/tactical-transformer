@@ -1,2 +1,5 @@
 smtlib/
 venv/
+__pycache__/
+data/
+tokenizer/
