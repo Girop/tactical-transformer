@@ -5,7 +5,7 @@ from transformer import TacticTransformer, SpecialTacticsTokens, ModelConfig, SR
 from z3alpha.parser import parse_linear_strategy
 from z3alpha.tactics.catalog import NAME_TO_ID, SOLVER_TACTICS, PREPROCESS_TACTICS, SOLVER_CATALOG, PREPROCESS_CATALOG
 from z3alpha.evaluator import SolverRunner
-from smt_graph import parse_graph
+from smt_graph import parse_graph, NUM_OPS
 from tqdm import tqdm
 
 from torch.utils.data import DataLoader
@@ -31,7 +31,7 @@ def encode_strats(contents: str, max_length=100):
     strats = [SpecialTacticsTokens.BOS_ID, *strats]
     repr = torch.tensor(strats, dtype=torch.int32)
     assert len(strats) < max_length
-    return F.pad(repr, (0, max_length - len(strats)), value=SpecialTacticsTokens.PAD_ID)
+    return F.pad(repr, (0, max_length - len(strats)), value=SpecialTacticsTokens.PAD_ID.value)
 
 
 def train_model(model: TacticTransformer, train: DataLoader, validation: DataLoader):
