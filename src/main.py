@@ -3,7 +3,7 @@ from dataloader import make_loaders, Status
 from pathlib import Path
 from transformer import TacticTransformer, SpecialTacticsTokens, ModelConfig, SRC_PAD_ID
 from z3alpha.parser import parse_linear_strategy
-from z3alpha.tactics.catalog import NAME_TO_ID, SOLVER_TACTICS, PREPROCESS_TACTICS, SOLVER_CATALOG, PREPROCESS_CATALOG
+from z3alpha.tactics.catalog import NAME_TO_ID, SOLVER_TACTICS, PREPROCESS_TACTICS, SOLVER_CATALOG, PREPROCESS_CATALOG, tactic_name_for_action
 from z3alpha.evaluator import SolverRunner
 from smt_graph import parse_graph, NUM_OPS
 from tqdm import tqdm
@@ -28,7 +28,7 @@ def encode_strats(contents: str, max_length=100):
         if name in PREPROCESS_TACTICS or name in SOLVER_TACTICS
     ]
     assert strats[-1] in SOLVER_CATALOG.keys()
-    strats = [SpecialTacticsTokens.BOS_ID, *strats]
+    strats = [SpecialTacticsTokens.BOS_ID.value, *strats]
     repr = torch.tensor(strats, dtype=torch.int32)
     assert len(strats) < max_length
     return F.pad(repr, (0, max_length - len(strats)), value=SpecialTacticsTokens.PAD_ID.value)
@@ -40,7 +40,7 @@ def train_model(model: TacticTransformer, train: DataLoader, validation: DataLoa
 
 def make_config():
     return ModelConfig(
-        graph_tensor_size=NUM_OPS,
+        graph_tensor_size=NUM_OPS + 1,
         max_graph_size=2_000,
         vocab_size=SpecialTacticsTokens.vocab_size(),
         model_dimension=256,
@@ -64,13 +64,18 @@ class Comparison:
     model_solved: bool
 
 
-def test_model(model, test, z3path, timeout=10.0) -> list[Comparison]:
+def test_model(model, test, z3path, device, timeout=10.0) -> list[Comparison]:
     results = []
     idx = 0
     for smt, _, bench_data in tqdm(test, desc="Testing"):
-        smt_repr = encode_smt_file(smt)
-        strats = model.generate(smt_repr)
+        strats = model.generate(smt.to(device))
         for bench, strat in zip(bench_data, strats):
+            ids = strat.tolist()[1:]  # drop BOS
+            if SpecialTacticsTokens.EOS_ID.value in ids:
+                ids = ids[:ids.index(SpecialTacticsTokens.EOS_ID.value)]
+            names = [tactic_name_for_action(i) for i in ids if i in SOLVER_CATALOG or i in PREPROCESS_CATALOG]
+            strat = f"(then {' '.join(names)})" if len(names) > 1 else (names[0] if names else "smt")
+
             _, status, runtime, _ = SolverRunner(
                 z3path,
                 str(bench.benchmark),
@@ -92,7 +97,7 @@ def test_model(model, test, z3path, timeout=10.0) -> list[Comparison]:
             idx += 1
     return results
 
-
+# TODO get something more interpretable
 def summarize(results: list[Comparison]) -> dict:
     n = len(results)
     both_solved = [r for r in results if r.baseline_solved and r.model_solved]
@@ -121,8 +126,8 @@ if __name__ == '__main__':
 
     device = torch.device('cuda')
     config = make_config()
-    model = TacticTransformer(config, device)
+    model = TacticTransformer(config, device).to(device)
     model = train_model(model, train, val)
-    results = test_model(model, test, z3path="z3")
+    results = test_model(model, test, z3path="z3", device=device)
     print(summarize(results))
 

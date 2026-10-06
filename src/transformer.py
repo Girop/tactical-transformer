@@ -18,7 +18,7 @@ class SpecialTacticsTokens(Enum):
 
     @classmethod
     def vocab_size(cls):
-        return cls.EOS_ID.value
+        return cls.EOS_ID.value + 1
 
 
 @dataclass(frozen=True)
