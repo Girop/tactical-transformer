@@ -94,7 +94,7 @@ def summarize(results: list[Comparison]) -> dict:
 
 def get_args() -> argparse.Namespace:
     arg = argparse.ArgumentParser()
-    arg.add_argument('--sample-count', type=int, default=200)
+    arg.add_argument('--sample-count', type=int, default=500)
     arg.add_argument('--data', type=Path, default=Path("experiments/labels/qfnia_sample2k"))
     return arg.parse_args()
 

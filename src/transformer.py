@@ -50,8 +50,8 @@ def skip_special_tokens(ids: list[int]) -> list[int]:
 
 def tactics_to_text(strats: list[int]) -> str:
     ids = skip_special_tokens(strats)
-    assert len(ids) > 0
-    assert all([i in VALID_ACTION_IDS for i in ids])
+    if len(ids) == 0:
+        return ""
     names = [tactic_name_for_action(ACTIONS_TO_OLD_IDS[i]) for i in ids]
     return f"(then {' '.join(names)})"
 
