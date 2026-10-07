@@ -1,13 +1,13 @@
 from dataclasses import dataclass
 from pathlib import Path
 import csv
-from typing import Callable
 from enum import Enum, auto
 from tqdm import tqdm
 from random import choices
+from typing import Optional
 
-from transformer import SpecialTacticsTokens, ModelConfig, SRC_PAD_ID
-from z3alpha.tactics.catalog import NAME_TO_ID, SOLVER_TACTICS, PREPROCESS_TACTICS, SOLVER_CATALOG
+from transformer import SpecialTacticsTokens, ModelConfig, SRC_PAD_ID, OLD_IDS_TO_ACTIONS, SOLVER_ACTIONS
+from z3alpha.tactics.catalog import SOLVER_TACTICS, PREPROCESS_TACTICS, NAME_TO_ID
 from z3alpha.parser import parse_linear_strategy
 from smt_graph import parse_graph
 
@@ -33,6 +33,8 @@ class Benchmark:
     solved: bool
 
 
+VALID_TACTIC_NAMES = [*PREPROCESS_TACTICS, *SOLVER_TACTICS]
+
 # TODO rethink, redesign
 def encode_smt_file(path: Path, max_graph_size) -> torch.Tensor:
     graph = parse_graph(path, max_nodes=max_graph_size)
@@ -40,24 +42,24 @@ def encode_smt_file(path: Path, max_graph_size) -> torch.Tensor:
     return F.pad(ops, (0, max_graph_size - len(ops)), value=SRC_PAD_ID)
 
 
-# TODO use config values
 def encode_strats(contents: str, max_length):
     strats = [
-        NAME_TO_ID[name] for (name, _params)
+        OLD_IDS_TO_ACTIONS[NAME_TO_ID[name]] for (name, _params)
         in parse_linear_strategy(contents)
-        if name in PREPROCESS_TACTICS or name in SOLVER_TACTICS
+        if name in VALID_TACTIC_NAMES
     ]
-    assert strats[-1] in SOLVER_CATALOG.keys()
-    strats = [SpecialTacticsTokens.BOS_ID.value, *strats]
-    repr = torch.tensor(strats, dtype=torch.int32)
-    assert len(strats) < max_length
+    assert strats and strats[-1] in SOLVER_ACTIONS, f"strategy must end in a solver tactic: {contents}"
+    strats = [SpecialTacticsTokens.BOS_ID.value, *strats, SpecialTacticsTokens.EOS_ID.value]
+    repr = torch.tensor(strats, dtype=torch.long)
+    assert len(strats) <= max_length
     return F.pad(repr, (0, max_length - len(strats)), value=SpecialTacticsTokens.PAD_ID.value)
 
 
 class TacticExample(Dataset):
 
     def __init__(self, benchmarks: list[Benchmark], config: ModelConfig):
-        self.smt = [encode_smt_file(p.benchmark, config.max_graph_size) for p in tqdm(benchmarks, desc="Encoding SMT problems")] # TODO a) Discarding too much info b) the benchmarks themselves can be interned
+        encoded = {p: encode_smt_file(p, config.max_graph_size) for p in tqdm({b.benchmark for b in benchmarks}, desc="Encoding SMT problems")} # TODO Discarding too much info
+        self.smt = [encoded[b.benchmark] for b in benchmarks]
         self.strat = [encode_strats(b.strat, config.max_strat_len) for b in tqdm(benchmarks, desc="Encoding strategies")]
         self.bench_data = benchmarks
 
@@ -94,7 +96,9 @@ def load_examples(dirpath: Path) -> list[Benchmark]:
     return res
 
 
-def make_loaders(benchmarks_out: Path, count: int, config: ModelConfig) -> dict[str, DataLoader]:
-    bench_results = choices(load_examples(benchmarks_out), k=count)
+def make_loaders(benchmarks_out: Path, config: ModelConfig, count: Optional[int] = None) -> dict[str, DataLoader]:
+    bench_results = load_examples(benchmarks_out)
+    if count is not None:
+        bench_results = choices(bench_results, k=count)
     dataset = TacticExample(bench_results, config)
     return make_splits(dataset)

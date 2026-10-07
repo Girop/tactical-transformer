@@ -21,10 +21,13 @@ def map_ids(catalog: dict[int, str], start=0) -> tuple[dict[int, str], dict[int,
     return new_mapping, back_mapping
 
 
+# TODO wrap in class
 SOLVER_ACTIONS, SOLVER_ACTIONS_TO_IDS = map_ids(SOLVER_CATALOG)
-PREPROCESS_ACTIONS, PREPROCESS_ACTIONS_TO_IDS = map_ids(PREPROCESS_CATALOG, max(SOLVER_ACTIONS.keys()))
+PREPROCESS_ACTIONS, PREPROCESS_ACTIONS_TO_IDS = map_ids(PREPROCESS_CATALOG, max(SOLVER_ACTIONS.keys()) + 1)
 VALID_ACTION_IDS = [*SOLVER_ACTIONS.keys(), *PREPROCESS_ACTIONS.keys()]
 ACTIONS_TO_OLD_IDS = SOLVER_ACTIONS_TO_IDS | PREPROCESS_ACTIONS_TO_IDS
+OLD_IDS_TO_ACTIONS = {old: new for new, old in ACTIONS_TO_OLD_IDS.items()}
+
 
 
 class SpecialTacticsTokens(IntEnum):
@@ -53,7 +56,7 @@ def tactics_to_text(strats: list[int]) -> str:
     if len(ids) == 0:
         return ""
     names = [tactic_name_for_action(ACTIONS_TO_OLD_IDS[i]) for i in ids]
-    return f"(then {' '.join(names)})"
+    return f"(then {' '.join(names)})" if len(names) > 1 else names[0]
 
 
 @dataclass(frozen=True)
@@ -66,6 +69,10 @@ class ModelConfig:
     attention_heads: int
     layers: int
     feedforward: int
+
+
+def causal_mask(size: int, device: torch.device) -> torch.Tensor:
+    return torch.triu(torch.ones(size, size, dtype=torch.bool, device=device), diagonal=1)
 
 
 class TacticTransformer(nn.Module):
@@ -90,7 +97,6 @@ class TacticTransformer(nn.Module):
         )
 
         self.out_projection = nn.Linear(self.config.model_dimension, self.config.vocab_size)
-        self.causal_mask = torch.triu(torch.ones(self.config.max_strat_len, self.config.max_strat_len, device=device, dtype=torch.bool), diagonal=1)
 
 
     @staticmethod
@@ -109,7 +115,7 @@ class TacticTransformer(nn.Module):
         x = self.transformer(
             src,
             tgt,
-            tgt_mask=self.causal_mask[:tgt_ids.size(1), :tgt_ids.size(1)],
+            tgt_mask=causal_mask(tgt_ids.size(1), tgt_ids.device),
             src_key_padding_mask=src_key_padding_mask,
             tgt_key_padding_mask=tgt_key_padding_mask,
             memory_key_padding_mask=src_key_padding_mask,
@@ -127,16 +133,20 @@ class TacticTransformer(nn.Module):
         memory = self.transformer.encoder(src, src_key_padding_mask=src_key_padding_mask)
 
         ys = torch.full((batch, 1), SpecialTacticsTokens.BOS_ID, dtype=torch.long, device=smt.device)
+        finished = torch.zeros(batch, dtype=torch.bool, device=smt.device)
         for _ in range(self.config.max_strat_len - 1):
             tgt = self._embed(ys, self.tgt_embedding, self.tgt_pos_embedding)
             out = self.transformer.decoder(
                 tgt, memory,
-                tgt_mask=self.causal_mask[:ys.size(1), :ys.size(1)],
+                tgt_mask=causal_mask(ys.size(1), ys.device),
                 memory_key_padding_mask=src_key_padding_mask,
             )
             next_ids = self.out_projection(out[:, -1]).argmax(dim=-1)
+            # Rows that already emitted EOS only get padding, so nothing after EOS reaches the strategy.
+            next_ids = next_ids.masked_fill(finished, SpecialTacticsTokens.PAD_ID)
             ys = torch.cat([ys, next_ids.unsqueeze(1)], dim=1)
-            if bool((next_ids == SpecialTacticsTokens.EOS_ID.value).all()):
+            finished |= next_ids == SpecialTacticsTokens.EOS_ID
+            if finished.all():
                 break
         return ys
 
