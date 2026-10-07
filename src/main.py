@@ -1,37 +1,14 @@
 from dataclasses import dataclass
 from dataloader import make_loaders, Status
 from pathlib import Path
-from transformer import TacticTransformer, SpecialTacticsTokens, ModelConfig, SRC_PAD_ID
-from z3alpha.parser import parse_linear_strategy
-from z3alpha.tactics.catalog import NAME_TO_ID, SOLVER_TACTICS, PREPROCESS_TACTICS, SOLVER_CATALOG, PREPROCESS_CATALOG, tactic_name_for_action
+from transformer import TacticTransformer, SpecialTacticsTokens, ModelConfig, tactics_to_text
 from z3alpha.evaluator import SolverRunner
-from smt_graph import parse_graph, NUM_OPS
+from smt_graph import NUM_OPS
 from tqdm import tqdm
+import argparse
 
 from torch.utils.data import DataLoader
-import torch.nn.functional as F
 import torch
-
-
-# TODO rethink, redesign
-def encode_smt_file(path: Path, max_graph_size=2_000) -> torch.Tensor:
-    graph = parse_graph(path, max_nodes=max_graph_size)
-    ops = torch.from_numpy(graph.op.astype("int64"))
-    return F.pad(ops, (0, max_graph_size - len(ops)), value=SRC_PAD_ID)
-
-
-# TODO use config values
-def encode_strats(contents: str, max_length=100):
-    strats = [
-        NAME_TO_ID[name] for (name, _params)
-        in parse_linear_strategy(contents)
-        if name in PREPROCESS_TACTICS or name in SOLVER_TACTICS
-    ]
-    assert strats[-1] in SOLVER_CATALOG.keys()
-    strats = [SpecialTacticsTokens.BOS_ID.value, *strats]
-    repr = torch.tensor(strats, dtype=torch.int32)
-    assert len(strats) < max_length
-    return F.pad(repr, (0, max_length - len(strats)), value=SpecialTacticsTokens.PAD_ID.value)
 
 
 def train_model(model: TacticTransformer, train: DataLoader, validation: DataLoader):
@@ -70,12 +47,7 @@ def test_model(model, test, z3path, device, timeout=10.0) -> list[Comparison]:
     for smt, _, bench_data in tqdm(test, desc="Testing"):
         strats = model.generate(smt.to(device))
         for bench, strat in zip(bench_data, strats):
-            ids = strat.tolist()[1:]  # drop BOS
-            if SpecialTacticsTokens.EOS_ID.value in ids:
-                ids = ids[:ids.index(SpecialTacticsTokens.EOS_ID.value)]
-            names = [tactic_name_for_action(i) for i in ids if i in SOLVER_CATALOG or i in PREPROCESS_CATALOG]
-            strat = f"(then {' '.join(names)})" if len(names) > 1 else (names[0] if names else "smt")
-
+            strat = tactics_to_text(strat.tolist())
             _, status, runtime, _ = SolverRunner(
                 z3path,
                 str(bench.benchmark),
@@ -119,15 +91,26 @@ def summarize(results: list[Comparison]) -> dict:
     }
 
 
-if __name__ == '__main__':
-    p = Path("experiments/labels/qfnia_sample2k")
-    loaders = make_loaders(p, 20, encode_smt_file, encode_strats)
+
+def get_args() -> argparse.Namespace:
+    arg = argparse.ArgumentParser()
+    arg.add_argument('--sample-count', type=int, default=200)
+    arg.add_argument('--data', type=Path, default=Path("experiments/labels/qfnia_sample2k"))
+    return arg.parse_args()
+
+
+def main(args):
+    config = make_config()
+    loaders = make_loaders(args.data, args.sample_count, config)
     train, val, test = loaders["train"], loaders["validation"], loaders["test"]
 
-    device = torch.device('cuda')
-    config = make_config()
+    device = torch.device('cpu')
     model = TacticTransformer(config, device).to(device)
     model = train_model(model, train, val)
     results = test_model(model, test, z3path="z3", device=device)
     print(summarize(results))
 
+
+if __name__ == '__main__':
+    args = get_args()
+    main(args)
