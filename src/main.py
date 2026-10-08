@@ -106,7 +106,7 @@ def get_args() -> argparse.Namespace:
     arg.add_argument('--name', type=str, default="tactics-model")
     arg.add_argument('--data', type=Path, required=True)
     arg.add_argument('--sample-count', type=int, default=None)
-    arg.add_argument('--only-test', type=bool, action="store_true")
+    arg.add_argument('--only-test', action="store_true")
     return arg.parse_args()
 
 
