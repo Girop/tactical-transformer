@@ -118,7 +118,7 @@ def main(args):
     train, val, test = loaders["train"], loaders["validation"], loaders["test"]
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = TacticTransformer(config, device).to(device)
-    if args.skip_train:
+    if not args.skip_train:
         print("Training")
         model = train_model(model, train, val, args.name)
     print("Testing")
