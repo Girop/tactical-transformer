@@ -7,4 +7,9 @@ Using very simple linearization graph walking encoder, should probably use some 
 # Producing the strategies
 Figure out proper handling of padding for graph representation
 
-Basic training loop impl
+
+# My questions
+How to generate data with z3alpha?
+How to train?
+How to split?
+How to benchmark?

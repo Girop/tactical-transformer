@@ -1,62 +1,10 @@
 from torch import nn
 import torch
-from z3alpha.tactics.catalog import  SOLVER_CATALOG, PREPROCESS_CATALOG
-from enum import IntEnum
 from dataclasses import dataclass
 from smt_graph import NUM_OPS
-from z3alpha.tactics.catalog import tactic_name_for_action
-
+from tactics import SpecialTacticsTokens
 
 SRC_PAD_ID = NUM_OPS
-
-
-# The tactic ids from z3alpha are not densly packed, some ids correspond to nothing.
-# As such, we need to map them to something that the model can work with, without producing invalid strategies.
-def map_ids(catalog: dict[int, str], start=0) -> tuple[dict[int, str], dict[int, int]]:
-    new_mapping = {}
-    back_mapping = {}
-    for idx, (old_idx, tactic) in enumerate(catalog.items()):
-        new_mapping[idx + start] = tactic
-        back_mapping[idx + start] = old_idx
-    return new_mapping, back_mapping
-
-
-# TODO wrap in class
-SOLVER_ACTIONS, SOLVER_ACTIONS_TO_IDS = map_ids(SOLVER_CATALOG)
-PREPROCESS_ACTIONS, PREPROCESS_ACTIONS_TO_IDS = map_ids(PREPROCESS_CATALOG, max(SOLVER_ACTIONS.keys()) + 1)
-VALID_ACTION_IDS = [*SOLVER_ACTIONS.keys(), *PREPROCESS_ACTIONS.keys()]
-ACTIONS_TO_OLD_IDS = SOLVER_ACTIONS_TO_IDS | PREPROCESS_ACTIONS_TO_IDS
-OLD_IDS_TO_ACTIONS = {old: new for new, old in ACTIONS_TO_OLD_IDS.items()}
-
-
-
-class SpecialTacticsTokens(IntEnum):
-    __LAST_STRAT_ID = max([*SOLVER_ACTIONS.keys(), *PREPROCESS_ACTIONS.keys()])
-
-    PAD_ID = __LAST_STRAT_ID + 1
-    UNK_ID = __LAST_STRAT_ID + 2
-    BOS_ID = __LAST_STRAT_ID + 3
-    EOS_ID = __LAST_STRAT_ID + 4
-
-    @classmethod
-    def tokens(cls):
-        return [cls.PAD_ID, cls.UNK_ID, cls.BOS_ID, cls.EOS_ID]
-
-    @classmethod
-    def vocab_size(cls):
-        return cls.EOS_ID + 1
-
-
-def skip_special_tokens(ids: list[int]) -> list[int]:
-    return [id for id in ids if id not in SpecialTacticsTokens.tokens()]
-
-
-def tactics_to_text(strats: list[int]) -> str:
-    ids = skip_special_tokens(strats)
-    if len(ids) == 0:
-        return ""
-    names = [tactic_name_for_action(ACTIONS_TO_OLD_IDS[i]) for i in ids]
-    return f"(then {' '.join(names)})" if len(names) > 1 else names[0]
 
 
 @dataclass(frozen=True)

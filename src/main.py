@@ -1,21 +1,22 @@
 from dataloader import make_loaders, Status, Benchmark
 from pathlib import Path
-from transformer import TacticTransformer, SpecialTacticsTokens, ModelConfig, tactics_to_text
+from transformer import TacticTransformer, ModelConfig
 from z3alpha.evaluator import SolverRunner
 from smt_graph import NUM_OPS
 from tqdm import tqdm
 import argparse
+from tactics import SpecialTacticsTokens, CATALOG
 
 from torch.utils.data import DataLoader
 import torch.nn.functional as F
 import torch
 
 
-def train_model(model: TacticTransformer, train: DataLoader, validation: DataLoader, epochs=20, lr=3e-4):
+def train_model(model: TacticTransformer, train: DataLoader, validation: DataLoader, name: str, epochs=20, lr=3e-4):
     Path("models").mkdir(exist_ok=True)
     device = model.device
     opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=0.01)
-    for epoch in range(epochs):
+    for epoch in tqdm(range(epochs), desc=f"Training"):
         model.train()
         train_loss = 0.0
         for smt, strat, _ in train:
@@ -28,7 +29,8 @@ def train_model(model: TacticTransformer, train: DataLoader, validation: DataLoa
             opt.step()
             train_loss += loss.item()
         print(f"epoch {epoch}: train loss - {train_loss / len(train):.4f}, validation loss - {validate(model, validation, device):.4f}")
-        torch.save(model.state_dict(), f'models/tactic-generation-epoch-{epoch}.pt')
+        torch.save(model.state_dict(), f'models/{name}-epoch-{epoch}.pt')
+    torch.save(model.state_dict(), f'models/{name}.pt')
     return model
 
 
@@ -50,7 +52,7 @@ def make_config():
     return ModelConfig(
         graph_tensor_size=NUM_OPS + 1,
         max_graph_size=2_000,
-        vocab_size=SpecialTacticsTokens.vocab_size(),
+        vocab_size=CATALOG.vocab_size(),
         model_dimension=256,
         max_strat_len=100,
         attention_heads=8,
@@ -66,7 +68,7 @@ def test_model(model, test, z3path, device, timeout=10.0) -> list[Benchmark]:
     for smt, _, bench_data in tqdm(test, desc="Testing"):
         strats = model.generate(smt.to(device))
         for bench, strat in zip(bench_data, strats):
-            strat = tactics_to_text(strat.tolist())
+            strat = CATALOG.tactics_to_text(strat.tolist())
             _, status, runtime, _ = SolverRunner(
                 z3path,
                 str(bench.benchmark),
@@ -99,11 +101,12 @@ def summarize(results: list[Benchmark], baseline: list[Benchmark]) -> dict:
     }
 
 
-
 def get_args() -> argparse.Namespace:
     arg = argparse.ArgumentParser()
+    arg.add_argument('--name', type=str, default="tactics-model")
     arg.add_argument('--data', type=Path, required=True)
     arg.add_argument('--sample-count', type=int, default=None)
+    arg.add_argument('--only-test', type=bool, action="store_true")
     return arg.parse_args()
 
 
@@ -113,7 +116,8 @@ def main(args):
     train, val, test = loaders["train"], loaders["validation"], loaders["test"]
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = TacticTransformer(config, device).to(device)
-    model = train_model(model, train, val)
+    if args.only_test:
+        model = train_model(model, train, val, args.name)
     results = test_model(model, test, z3path="z3", device=device)
     print(summarize(results, get_baseline(test)))
 

@@ -6,10 +6,11 @@ from tqdm import tqdm
 from random import choices
 from typing import Optional
 
-from transformer import SpecialTacticsTokens, ModelConfig, SRC_PAD_ID, OLD_IDS_TO_ACTIONS, SOLVER_ACTIONS
+from transformer import SpecialTacticsTokens, ModelConfig, SRC_PAD_ID
 from z3alpha.tactics.catalog import SOLVER_TACTICS, PREPROCESS_TACTICS, NAME_TO_ID
 from z3alpha.parser import parse_linear_strategy
 from smt_graph import parse_graph
+from tactics import CATALOG
 
 import torch
 import torch.nn.functional as F
@@ -44,11 +45,10 @@ def encode_smt_file(path: Path, max_graph_size) -> torch.Tensor:
 
 def encode_strats(contents: str, max_length):
     strats = [
-        OLD_IDS_TO_ACTIONS[NAME_TO_ID[name]] for (name, _params)
+        CATALOG.name_to_id(name) for (name, _params)
         in parse_linear_strategy(contents)
         if name in VALID_TACTIC_NAMES
     ]
-    assert strats and strats[-1] in SOLVER_ACTIONS, f"strategy must end in a solver tactic: {contents}"
     strats = [SpecialTacticsTokens.BOS_ID.value, *strats, SpecialTacticsTokens.EOS_ID.value]
     repr = torch.tensor(strats, dtype=torch.long)
     assert len(strats) <= max_length
