@@ -1,16 +1,11 @@
 from torch import nn
 import torch
 from dataclasses import dataclass
-from smt_graph import NUM_OPS
 from tactics import SpecialTacticsTokens
-
-SRC_PAD_ID = NUM_OPS
 
 
 @dataclass(frozen=True)
 class ModelConfig:
-    graph_tensor_size: int
-    max_graph_size: int
     vocab_size: int
     model_dimension: int
     max_strat_len: int
@@ -28,9 +23,6 @@ class TacticTransformer(nn.Module):
         super().__init__()
         self.config = config
         self.device = device
-
-        self.src_embedding = nn.Embedding(self.config.graph_tensor_size, self.config.model_dimension)
-        self.src_pos_embedding = nn.Embedding(self.config.max_graph_size, self.config.model_dimension)
 
         self.tgt_embedding = nn.Embedding(self.config.vocab_size, self.config.model_dimension)
         self.tgt_pos_embedding = nn.Embedding(self.config.max_strat_len, self.config.model_dimension)
@@ -53,20 +45,23 @@ class TacticTransformer(nn.Module):
         return tok_emb(ids) + pos_emb(pos)
 
 
-    def forward(self, src_ids: torch.Tensor, tgt_ids: torch.Tensor):
-        src = self._embed(src_ids, self.src_embedding, self.src_pos_embedding)
+    @staticmethod
+    def _encode_src(smt: torch.Tensor) -> torch.Tensor:
+        """The source is a single token, the GIN embedding: [B, model_dimension] -> [B, 1, model_dimension]."""
+        return smt.unsqueeze(1)
+
+
+    def forward(self, smt: torch.Tensor, tgt_ids: torch.Tensor):
+        src = self._encode_src(smt)
         tgt = self._embed(tgt_ids, self.tgt_embedding, self.tgt_pos_embedding)
 
-        src_key_padding_mask = src_ids == SRC_PAD_ID
         tgt_key_padding_mask = tgt_ids == SpecialTacticsTokens.PAD_ID
 
         x = self.transformer(
             src,
             tgt,
             tgt_mask=causal_mask(tgt_ids.size(1), tgt_ids.device),
-            src_key_padding_mask=src_key_padding_mask,
             tgt_key_padding_mask=tgt_key_padding_mask,
-            memory_key_padding_mask=src_key_padding_mask,
         )
         return self.out_projection(x)
 
@@ -76,9 +71,7 @@ class TacticTransformer(nn.Module):
         self.eval()
         batch = smt.size(0)
 
-        src = self._embed(smt, self.src_embedding, self.src_pos_embedding)
-        src_key_padding_mask = smt == SRC_PAD_ID
-        memory = self.transformer.encoder(src, src_key_padding_mask=src_key_padding_mask)
+        memory = self.transformer.encoder(self._encode_src(smt))
 
         ys = torch.full((batch, 1), SpecialTacticsTokens.BOS_ID, dtype=torch.long, device=smt.device)
         finished = torch.zeros(batch, dtype=torch.bool, device=smt.device)
@@ -87,7 +80,6 @@ class TacticTransformer(nn.Module):
             out = self.transformer.decoder(
                 tgt, memory,
                 tgt_mask=causal_mask(ys.size(1), ys.device),
-                memory_key_padding_mask=src_key_padding_mask,
             )
             next_ids = self.out_projection(out[:, -1]).argmax(dim=-1)
             # Rows that already emitted EOS only get padding, so nothing after EOS reaches the strategy.

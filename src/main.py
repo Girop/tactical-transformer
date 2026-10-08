@@ -2,24 +2,24 @@ from dataloader import make_loaders, Status, Benchmark
 from pathlib import Path
 from transformer import TacticTransformer, ModelConfig
 from z3alpha.evaluator import SolverRunner
-from smt_graph import NUM_OPS
 from tqdm import tqdm
 import argparse
 from tactics import SpecialTacticsTokens, CATALOG
+from smt_embed import GIN_DIM
 
 from torch.utils.data import DataLoader
 import torch.nn.functional as F
 import torch
 
 
-def train_model(model: TacticTransformer, train: DataLoader, validation: DataLoader, name: str, epochs=20, lr=3e-4):
+def train_model(model: TacticTransformer, train: DataLoader, validation: DataLoader, name: str, epochs: int, lr=3e-4):
     Path("models").mkdir(exist_ok=True)
     device = model.device
     opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=0.01)
-    for epoch in tqdm(range(epochs), desc=f"Training"):
+    for epoch in range(epochs):
         model.train()
         train_loss = 0.0
-        for smt, strat, _ in train:
+        for smt, strat, bench in tqdm(train, desc="Batch:"):
             smt, strat = smt.to(device), strat.to(device)
             logits = model(smt, strat[:, :-1])
             loss = F.cross_entropy(logits.transpose(1, 2), strat[:, 1:], ignore_index=SpecialTacticsTokens.PAD_ID)
@@ -50,10 +50,8 @@ def validate(model: TacticTransformer, loader: DataLoader, device) -> float:
 
 def make_config():
     return ModelConfig(
-        graph_tensor_size=NUM_OPS + 1,
-        max_graph_size=2_000,
         vocab_size=CATALOG.vocab_size(),
-        model_dimension=256,
+        model_dimension=GIN_DIM,   # the GIN embedding is fed to the transformer as is
         max_strat_len=100,
         attention_heads=8,
         layers=6,
@@ -104,6 +102,7 @@ def summarize(results: list[Benchmark], baseline: list[Benchmark]) -> dict:
 def get_args() -> argparse.Namespace:
     arg = argparse.ArgumentParser()
     arg.add_argument('--name', type=str, default="tactics-model")
+    arg.add_argument('--epochs', type=int, default=10)
     arg.add_argument('--data', type=Path, required=True)
     arg.add_argument('--sample-count', type=int, default=None)
     arg.add_argument('--skip-train', action="store_true")
@@ -120,7 +119,7 @@ def main(args):
     model = TacticTransformer(config, device).to(device)
     if not args.skip_train:
         print("Training")
-        model = train_model(model, train, val, args.name)
+        model = train_model(model, train, val, args.name, args.epochs)
     print("Testing")
     results = test_model(model, test, z3path="z3", device=device)
     print(summarize(results, get_baseline(test)))

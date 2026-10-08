@@ -6,9 +6,9 @@ from tqdm import tqdm
 from random import choices
 from typing import Optional
 
-from transformer import SpecialTacticsTokens, ModelConfig, SRC_PAD_ID
+from transformer import SpecialTacticsTokens, ModelConfig
 from z3alpha.parser import parse_linear_strategy
-from smt_graph import parse_graph
+from smt_embed import embed_benchmarks
 from tactics import CATALOG
 
 import torch
@@ -33,13 +33,6 @@ class Benchmark:
     solved: bool
 
 
-# TODO rethink, redesign
-def encode_smt_file(path: Path, max_graph_size) -> torch.Tensor:
-    graph = parse_graph(path, max_nodes=max_graph_size)
-    ops = torch.from_numpy(graph.op.astype("int64"))
-    return F.pad(ops, (0, max_graph_size - len(ops)), value=SRC_PAD_ID)
-
-
 def encode_strats(contents: str, max_length):
     strats = [
         CATALOG.name_to_id(name) for (name, _params)
@@ -55,9 +48,10 @@ def encode_strats(contents: str, max_length):
 class TacticExample(Dataset):
 
     def __init__(self, benchmarks: list[Benchmark], config: ModelConfig):
-        encoded = {p: encode_smt_file(p, config.max_graph_size) for p in tqdm({b.benchmark for b in benchmarks}, desc="Encoding SMT problems")} # TODO Discarding too much info
+        encoded = embed_benchmarks({b.benchmark for b in benchmarks})
+        benchmarks = [b for b in benchmarks if b.benchmark in encoded]   # skip files the GIN cannot encode
         self.smt = [encoded[b.benchmark] for b in benchmarks]
-        self.strat = [encode_strats(b.strat, config.max_strat_len) for b in tqdm(benchmarks, desc="Encoding strategies")]
+        self.strat = [encode_strats(b.strat, config.max_strat_len) for b in benchmarks]
         self.bench_data = benchmarks
 
     def __len__(self):
