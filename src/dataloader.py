@@ -7,7 +7,6 @@ from random import choices
 from typing import Optional
 
 from transformer import SpecialTacticsTokens, ModelConfig, SRC_PAD_ID
-from z3alpha.tactics.catalog import SOLVER_TACTICS, PREPROCESS_TACTICS, NAME_TO_ID
 from z3alpha.parser import parse_linear_strategy
 from smt_graph import parse_graph
 from tactics import CATALOG
@@ -34,8 +33,6 @@ class Benchmark:
     solved: bool
 
 
-VALID_TACTIC_NAMES = [*PREPROCESS_TACTICS, *SOLVER_TACTICS]
-
 # TODO rethink, redesign
 def encode_smt_file(path: Path, max_graph_size) -> torch.Tensor:
     graph = parse_graph(path, max_nodes=max_graph_size)
@@ -47,7 +44,7 @@ def encode_strats(contents: str, max_length):
     strats = [
         CATALOG.name_to_id(name) for (name, _params)
         in parse_linear_strategy(contents)
-        if name in VALID_TACTIC_NAMES
+        if name in CATALOG.valid_tactic_names
     ]
     strats = [SpecialTacticsTokens.BOS_ID.value, *strats, SpecialTacticsTokens.EOS_ID.value]
     repr = torch.tensor(strats, dtype=torch.long)

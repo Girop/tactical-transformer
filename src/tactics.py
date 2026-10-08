@@ -1,5 +1,5 @@
 from enum import IntEnum
-from z3alpha.tactics.catalog import  SOLVER_CATALOG, PREPROCESS_CATALOG, NAME_TO_ID
+from z3alpha.tactics.catalog import SOLVER_CATALOG, PREPROCESS_CATALOG, NAME_TO_ID
 
 
 # The tactic ids from z3alpha are not densly packed, some ids correspond to nothing.
@@ -12,6 +12,7 @@ class NewCatalog:
         self.__to_name = solver_actions | preprocessor_actions
         self.__from_old_id = solver_to_old_id | preprocessor_to_old_id
         self.last_strat_id = max(self.__to_name.keys())
+        self.valid_tactic_names = [*solver_actions.values(), *preprocessor_actions.values()]
 
 
     @staticmethod
