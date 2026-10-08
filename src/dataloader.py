@@ -2,7 +2,6 @@ from dataclasses import dataclass
 from pathlib import Path
 import csv
 from enum import Enum, auto
-from tqdm import tqdm
 from random import choices
 from typing import Optional
 
@@ -77,8 +76,10 @@ def make_splits(benchmarks: TacticExample, batch_size=16, validation: float = 0.
     }
 
 
-# load by families, specify dataset split configuratio in a config.json
-# TODO load by famil, choose some, keep some away for testing
+# TODO the best shot at improving things is now to generate more, high quality data.
+# a) more best linear strategies found by z3alpha
+# b) sample fairly (round-robin style?) from each of the families
+# c) use much more compute and leave it for longer
 def load_examples(dirpath: Path) -> list[Benchmark]:
     assert dirpath.is_dir()
     res = []

@@ -19,7 +19,7 @@ def train_model(model: TacticTransformer, train: DataLoader, validation: DataLoa
     for epoch in range(epochs):
         model.train()
         train_loss = 0.0
-        for smt, strat, bench in tqdm(train, desc="Batch:"):
+        for smt, strat, _ in tqdm(train, desc="Batch:"):
             smt, strat = smt.to(device), strat.to(device)
             logits = model(smt, strat[:, :-1])
             loss = F.cross_entropy(logits.transpose(1, 2), strat[:, 1:], ignore_index=SpecialTacticsTokens.PAD_ID)
