@@ -83,6 +83,8 @@ def make_splits(benchmarks: TacticExample, batch_size=16, validation: float = 0.
     }
 
 
+# load by families, specify dataset split configuratio in a config.json
+# TODO load by famil, choose some, keep some away for testing
 def load_examples(dirpath: Path) -> list[Benchmark]:
     assert dirpath.is_dir()
     res = []

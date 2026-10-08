@@ -111,13 +111,17 @@ def get_args() -> argparse.Namespace:
 
 
 def main(args):
+    print("Tactic selection transformer")
     config = make_config()
+    print("Loading data...")
     loaders = make_loaders(args.data, config, args.sample_count)
     train, val, test = loaders["train"], loaders["validation"], loaders["test"]
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = TacticTransformer(config, device).to(device)
     if args.only_test:
+        print("Training")
         model = train_model(model, train, val, args.name)
+    print("Testing")
     results = test_model(model, test, z3path="z3", device=device)
     print(summarize(results, get_baseline(test)))
 
