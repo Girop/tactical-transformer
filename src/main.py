@@ -106,7 +106,7 @@ def get_args() -> argparse.Namespace:
     arg.add_argument('--name', type=str, default="tactics-model")
     arg.add_argument('--data', type=Path, required=True)
     arg.add_argument('--sample-count', type=int, default=None)
-    arg.add_argument('--only-test', action="store_true")
+    arg.add_argument('--skip-train', action="store_true")
     return arg.parse_args()
 
 
@@ -118,7 +118,7 @@ def main(args):
     train, val, test = loaders["train"], loaders["validation"], loaders["test"]
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = TacticTransformer(config, device).to(device)
-    if args.only_test:
+    if args.skip_train:
         print("Training")
         model = train_model(model, train, val, args.name)
     print("Testing")
