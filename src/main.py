@@ -59,8 +59,9 @@ def make_config():
 
 
 
-def test_model(model, test, z3path, device, timeout=10.0) -> list[Benchmark]:
+def test_model(model: TacticTransformer, test, z3path, timeout=10.0) -> list[Benchmark]:
     results = []
+    device = model.device
     idx = 0
     for smt, _, bench_data in tqdm(test, desc="Testing"):
         strats = model.generate(smt.to(device))
@@ -85,17 +86,32 @@ def get_baseline(test: DataLoader) -> list[Benchmark]:
     return baseline
 
 
-def summarize(results: list[Benchmark], baseline: list[Benchmark]) -> dict:
+def summarize(results: list[Benchmark], baseline: list[Benchmark], timeout: float) -> dict:
     assert len(results) == len(baseline)
     n = len(results)
-
+    par2 = lambda b: b.time_s if b.solved else 2 * timeout
     return {
         "example_count": n,
         "solve_rate_baseline": sum(b.solved for b in baseline) / n,
         "solve_rate_model": sum(b.solved for b in results) / n,
         "mean_runtime_baseline": sum(b.time_s for b in baseline) / n,
         "mean_runtime_model": sum(b.time_s for b in results) / n,
+        "mean_par2_baseline": sum(par2(b) for b in baseline) / n,
+        "mean_par2_model": sum(par2(b) for b in results) / n,
     }
+
+
+def run_test(model: TacticTransformer, test: DataLoader, z3path: Path | str, timeout: float = 10.0):
+    results = test_model(model, test, z3path=z3path, timeout=timeout)
+    summary = summarize(results, get_baseline(test), timeout)
+    print_summary(summary)
+
+
+def print_summary(summary: dict):
+    print("Run statistics: " + "=" * 10)
+    for key, value in summary.items():
+        value = f"{value:.4f}" if isinstance(value, float) else str(value)
+        print(f"{key}: {value}")
 
 
 def get_args() -> argparse.Namespace:
@@ -120,9 +136,7 @@ def main(args):
     if not args.skip_train:
         print("Training")
         model = train_model(model, train, val, args.name, args.epochs)
-    print("Testing")
-    results = test_model(model, test, z3path=args.z3, device=device)
-    print(summarize(results, get_baseline(test)))
+    run_test(model, test, args.z3)
 
 
 if __name__ == '__main__':
