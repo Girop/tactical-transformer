@@ -1,8 +1,9 @@
 from dataclasses import dataclass
 from pathlib import Path
 import csv
+import warnings
 from enum import Enum, auto
-from random import choices
+from random import sample
 from typing import Optional
 
 from transformer import SpecialTacticsTokens, ModelConfig
@@ -32,15 +33,18 @@ class Benchmark:
     solved: bool
 
 
-def encode_strats(contents: str, max_length):
+def encode_strats(contents: str, max_length: int):
     strats = [
         CATALOG.name_to_id(name) for (name, _params)
         in parse_linear_strategy(contents)
         if name in CATALOG.valid_tactic_names
     ]
     strats = [SpecialTacticsTokens.BOS_ID.value, *strats, SpecialTacticsTokens.EOS_ID.value]
+    if len(strats) > max_length:
+        warnings.warn(f"Strategy of length {len(strats)} truncated to {max_length}, strategy: {contents}")
+        strats = strats[:max_length]
+        strats[-1] = SpecialTacticsTokens.EOS_ID.value
     repr = torch.tensor(strats, dtype=torch.long)
-    assert len(strats) <= max_length
     return F.pad(repr, (0, max_length - len(strats)), value=SpecialTacticsTokens.PAD_ID.value)
 
 
@@ -93,6 +97,6 @@ def load_examples(dirpath: Path) -> list[Benchmark]:
 def make_loaders(benchmarks_out: Path, config: ModelConfig, count: Optional[int] = None) -> dict[str, DataLoader]:
     bench_results = load_examples(benchmarks_out)
     if count is not None:
-        bench_results = choices(bench_results, k=count)
+        bench_results = sample(bench_results, k=count)
     dataset = TacticExample(bench_results, config)
     return make_splits(dataset)

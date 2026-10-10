@@ -19,10 +19,9 @@ def causal_mask(size: int, device: torch.device) -> torch.Tensor:
 
 
 class TacticTransformer(nn.Module):
-    def __init__(self, config: ModelConfig, device) -> None:
+    def __init__(self, config: ModelConfig) -> None:
         super().__init__()
         self.config = config
-        self.device = device
 
         self.tgt_embedding = nn.Embedding(self.config.vocab_size, self.config.model_dimension)
         self.tgt_pos_embedding = nn.Embedding(self.config.max_strat_len, self.config.model_dimension)
@@ -38,6 +37,9 @@ class TacticTransformer(nn.Module):
 
         self.out_projection = nn.Linear(self.config.model_dimension, self.config.vocab_size)
 
+    @property
+    def device(self):
+        return next(self.transformer.parameters()).device
 
     @staticmethod
     def _embed(ids: torch.Tensor, tok_emb: nn.Embedding, pos_emb: nn.Embedding) -> torch.Tensor:

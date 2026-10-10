@@ -36,7 +36,7 @@ def embed_benchmarks(paths, cache_dir: Path = Path("data/embedding_cache")) -> d
     """
     cache = Path(cache_dir) / f"{GIN_MODEL_DIR.parent.name}-{GIN_MODEL_DIR.name}.pt"
     # Keyed by str: torch.load(weights_only=True) cannot unpickle Path objects.
-    embeddings = {Path(p): e for p, e in torch.load(cache).items()} if cache.exists() else {}
+    embeddings = {Path(p): e for p, e in torch.load(cache, weights_only=True).items()} if cache.exists() else {}
 
     paths = set(map(Path, paths))
     todo = sorted(paths - embeddings.keys())

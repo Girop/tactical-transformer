@@ -36,16 +36,15 @@ def train_model(model: TacticTransformer, train: DataLoader, validation: DataLoa
 
 @torch.no_grad()
 def validate(model: TacticTransformer, loader: DataLoader, device) -> float:
-    """Mean per-token loss over the loader, padding excluded."""
+    """Mean per-batch loss over the loader, padding excluded."""
     model.eval()
-    total = tokens = 0
+    total = 0.0
     for smt, strat, _ in loader:
         smt, strat = smt.to(device), strat.to(device)
         logits = model(smt, strat[:, :-1])
         total += F.cross_entropy(logits.transpose(1, 2), strat[:, 1:],
-                                 ignore_index=SpecialTacticsTokens.PAD_ID, reduction="sum").item()
-        tokens += (strat[:, 1:] != SpecialTacticsTokens.PAD_ID).sum().item()
-    return total / tokens
+                                 ignore_index=SpecialTacticsTokens.PAD_ID).item()
+    return total / len(loader)
 
 
 def make_config():
@@ -101,11 +100,12 @@ def summarize(results: list[Benchmark], baseline: list[Benchmark]) -> dict:
 
 def get_args() -> argparse.Namespace:
     arg = argparse.ArgumentParser()
+    arg.add_argument('--data', type=Path, required=True)
     arg.add_argument('--name', type=str, default="tactics-model")
     arg.add_argument('--epochs', type=int, default=10)
-    arg.add_argument('--data', type=Path, required=True)
     arg.add_argument('--sample-count', type=int, default=None)
     arg.add_argument('--skip-train', action="store_true")
+    arg.add_argument('--z3', type=str, default="z3")
     return arg.parse_args()
 
 
@@ -116,12 +116,12 @@ def main(args):
     loaders = make_loaders(args.data, config, args.sample_count)
     train, val, test = loaders["train"], loaders["validation"], loaders["test"]
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = TacticTransformer(config, device).to(device)
+    model = TacticTransformer(config).to(device)
     if not args.skip_train:
         print("Training")
         model = train_model(model, train, val, args.name, args.epochs)
     print("Testing")
-    results = test_model(model, test, z3path="z3", device=device)
+    results = test_model(model, test, z3path=args.z3, device=device)
     print(summarize(results, get_baseline(test)))
 
 
