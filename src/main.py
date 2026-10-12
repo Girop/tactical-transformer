@@ -116,7 +116,9 @@ def print_summary(summary: dict):
 
 def get_args() -> argparse.Namespace:
     arg = argparse.ArgumentParser()
-    arg.add_argument('--data', type=Path, required=True)
+    arg.add_argument('--data', type=Path, default=Path("experiments/train"))
+    arg.add_argument('--excluded', type=Path, default=Path("data/excluded.txt"),
+                     help="exclusion list produced by generate.py split")
     arg.add_argument('--name', type=str, default="tactics-model")
     arg.add_argument('--epochs', type=int, default=10)
     arg.add_argument('--sample-count', type=int, default=None)
@@ -128,8 +130,9 @@ def get_args() -> argparse.Namespace:
 def main(args):
     print("Tactic selection transformer")
     config = make_config()
+    excluded = set(args.excluded.read_text().splitlines()) if args.excluded.exists() else None
     print("Loading data...")
-    loaders = make_loaders(args.data, config, args.sample_count)
+    loaders = make_loaders(args.data, config, args.sample_count, excluded)
     train, val, test = loaders["train"], loaders["validation"], loaders["test"]
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = TacticTransformer(config).to(device)

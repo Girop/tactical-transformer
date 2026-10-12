@@ -4,7 +4,7 @@ import csv
 import warnings
 from enum import Enum, auto
 from random import sample
-from typing import Optional
+from typing import Optional, Callable
 
 from transformer import SpecialTacticsTokens, ModelConfig
 from z3alpha.parser import parse_linear_strategy
@@ -31,6 +31,10 @@ class Benchmark:
     status: Status
     time_s: float
     solved: bool
+
+    @classmethod
+    def from_row(cls, row):
+        return cls(row["strat"], Path(row["benchmark"]), Status[row["status"]], float(row["time_s"]), row["solved"] == "True")
 
 
 def encode_strats(contents: str, max_length: int):
@@ -84,18 +88,27 @@ def make_splits(benchmarks: TacticExample, batch_size=16, validation: float = 0.
 # a) more best linear strategies found by z3alpha
 # b) sample fairly (round-robin style?) from each of the families
 # c) use much more compute and leave it for longer
-def load_examples(dirpath: Path) -> list[Benchmark]:
+def load_examples(dirpath: Path, predicate: Callable) -> list[Benchmark]:
     assert dirpath.is_dir()
     res = []
-    for p in dirpath.rglob("*.csv"):
-        with open(p, newline="") as fp:
-            for row in csv.DictReader(fp):
-                res.append(Benchmark(row["strat"], Path(row["benchmark"]), Status[row["status"]], float(row["time_s"]), row["solved"] == "True"))
+    with open(dirpath / "all.csv", newline="") as fp:
+        for row in csv.DictReader(fp):
+            if predicate(row):
+                continue
+            res.append(Benchmark.from_row(row))
     return res
 
 
-def make_loaders(benchmarks_out: Path, config: ModelConfig, count: Optional[int] = None) -> dict[str, DataLoader]:
-    bench_results = load_examples(benchmarks_out)
+def load_final_predictions(dirpath: Path, excluded: set[str], config: ModelConfig, batch_size: int = 16) -> DataLoader:
+    should_skip = lambda row: row["benchmark"] not in excluded
+    res = load_examples(dirpath, should_skip)
+    dataset = TacticExample(res, config)
+    return DataLoader(dataset, batch_size=batch_size, shuffle=False, pin_memory=True, collate_fn=TacticExample.collate_fn)
+
+
+def make_loaders(benchmarks_out: Path, config: ModelConfig, count: Optional[int] = None, excluded: Optional[set[str]] = None) -> dict[str, DataLoader]:
+    should_skip = lambda row: excluded and row["benchmark"] in excluded
+    bench_results = load_examples(benchmarks_out, should_skip)
     if count is not None:
         bench_results = sample(bench_results, k=count)
     dataset = TacticExample(bench_results, config)

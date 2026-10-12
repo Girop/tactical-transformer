@@ -237,24 +237,36 @@ def cmd_merge(args):
     for fam in sorted(by_fam):
         print(f"  {fam:40s} {statistics.mean(by_fam[fam]):.3f}  ({len(by_fam[fam])} rows)")
 
-    log.info(f"Wrote {args.train / 'all.csv'} and {args.train / 'solved.csv'}")
+    log.info(f"Wrote {args.train / 'all.csv'}")
 
 
 def cmd_split(args):
+    all_csv = args.train / "all.csv"
+    if not all_csv.exists():
+        log.error(f"all.csv not found at {all_csv} — run merge first")
+        return
+
+    logic_families: dict[str, set[str]] = defaultdict(set)
+    for r in read_csv(all_csv):
+        logic_families[r["logic"]].add(r["family"])
+
+    if not logic_families:
+        log.error("No logic/family pairs found in all.csv")
+        return
+
     rng = random.Random(args.seed)
     excluded: list[str] = []
 
-    for logic in args.logics:
+    for logic, families in sorted(logic_families.items()):
         logic_dir = args.smtlib_root / logic
         if not logic_dir.exists():
             log.warning(f"Logic directory not found, skipping: {logic_dir}")
             continue
         benches = create_benchmark_list([str(logic_dir)])
-        allowed = set(args.benchmarks)
         by_family: dict[str, list[str]] = defaultdict(list)
         for b in benches:
             family = family_of(b, str(logic_dir))
-            if family in allowed:
+            if family in families:
                 by_family[family].append(b)
         # Draw per family so small families still get test benchmarks.
         for family in sorted(by_family):
@@ -264,7 +276,7 @@ def cmd_split(args):
             log.info(f"{logic}/{family}: {k} of {len(members)} held out")
 
     if not excluded:
-        log.error("No benchmarks found — check --smtlib-root and --logics")
+        log.error("No benchmarks found — check --smtlib-root and --train")
         return
 
     write_lines(args.out, sorted(excluded))
@@ -278,7 +290,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     # --- prepare ---
     p = sub.add_parser("prepare", help="Discover benchmarks, partition into blocks, write task table")
-    p.add_argument("--smtlib-root", type=Path, required=True,
+    p.add_argument("--smtlib-root", type=Path, default=Path("smtlib/non-incremental"),
                     help="root directory containing one subdirectory per logic (e.g. smtlib/non-incremental/)")
     p.add_argument("--logics", nargs="+", required=True,
                     help="logic names to process (subdirectories of --smtlib-root)")
@@ -303,19 +315,17 @@ def build_parser() -> argparse.ArgumentParser:
 
     # --- merge ---
     p = sub.add_parser("merge", help="Merge stage-1 results, enrich with logic/family, write training CSVs")
-    p.add_argument("--smtlib-root", type=Path, required=True,
+    p.add_argument("--smtlib-root", type=Path, default=Path("smtlib/non-incremental"),
                     help="same --smtlib-root used in prepare (needed to derive family from benchmark paths)")
     p.add_argument("--stage1-root", type=Path, default=Path("experiments/stage1"))
     p.add_argument("--train", type=Path, default=Path("experiments/train"))
 
     # --- split ---
     p = sub.add_parser("split", help="Draw held-out test benchmarks, write them to an exclusion list")
-    p.add_argument("--smtlib-root", type=Path, required=True,
+    p.add_argument("--smtlib-root", type=Path, default=Path("smtlib/non-incremental"),
                     help="same --smtlib-root used in prepare, so paths match the benchmark column of all.csv")
-    p.add_argument("--logics", nargs="+", required=True,
-                    help="logic names to process (subdirectories of --smtlib-root)")
-    p.add_argument("--benchmarks", nargs="+", required=True,
-                    help="benchmark families to draw from (e.g. leipzig AProVE)")
+    p.add_argument("--train", type=Path, default=Path("experiments/train"),
+                    help="directory containing all.csv produced by merge")
     p.add_argument("--test-fraction", type=float, default=0.2,
                     help="fraction held out per logic/family (at least one benchmark each)")
     p.add_argument("--seed", type=int, default=42)
