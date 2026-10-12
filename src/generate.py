@@ -4,6 +4,7 @@ Subcommands (run in order):
   prepare   Discover SMT-LIB benchmarks, partition into blocks, write task table.
   stage1    Run one MCTS search per task (one Slurm array element each).
   merge     Merge stage-1 results, enrich with logic/family, write training CSVs.
+  split     Draw held-out test benchmarks per logic/family, write them to an exclusion list.
 
 See scripts/generate_data.sh for cluster and local invocation.
 """
@@ -239,6 +240,37 @@ def cmd_merge(args):
     log.info(f"Wrote {args.train / 'all.csv'} and {args.train / 'solved.csv'}")
 
 
+def cmd_split(args):
+    rng = random.Random(args.seed)
+    excluded: list[str] = []
+
+    for logic in args.logics:
+        logic_dir = args.smtlib_root / logic
+        if not logic_dir.exists():
+            log.warning(f"Logic directory not found, skipping: {logic_dir}")
+            continue
+        benches = create_benchmark_list([str(logic_dir)])
+        allowed = set(args.benchmarks)
+        by_family: dict[str, list[str]] = defaultdict(list)
+        for b in benches:
+            family = family_of(b, str(logic_dir))
+            if family in allowed:
+                by_family[family].append(b)
+        # Draw per family so small families still get test benchmarks.
+        for family in sorted(by_family):
+            members = by_family[family]
+            k = max(1, round(len(members) * args.test_fraction))
+            excluded.extend(rng.sample(members, k))
+            log.info(f"{logic}/{family}: {k} of {len(members)} held out")
+
+    if not excluded:
+        log.error("No benchmarks found — check --smtlib-root and --logics")
+        return
+
+    write_lines(args.out, sorted(excluded))
+    log.info(f"{len(excluded)} excluded benchmarks written to {args.out}")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -276,13 +308,27 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--stage1-root", type=Path, default=Path("experiments/stage1"))
     p.add_argument("--train", type=Path, default=Path("experiments/train"))
 
+    # --- split ---
+    p = sub.add_parser("split", help="Draw held-out test benchmarks, write them to an exclusion list")
+    p.add_argument("--smtlib-root", type=Path, required=True,
+                    help="same --smtlib-root used in prepare, so paths match the benchmark column of all.csv")
+    p.add_argument("--logics", nargs="+", required=True,
+                    help="logic names to process (subdirectories of --smtlib-root)")
+    p.add_argument("--benchmarks", nargs="+", required=True,
+                    help="benchmark families to draw from (e.g. leipzig AProVE)")
+    p.add_argument("--test-fraction", type=float, default=0.2,
+                    help="fraction held out per logic/family (at least one benchmark each)")
+    p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--out", type=Path, default=Path("data/excluded.txt"))
+
     return parser
 
 
 def main():
     args = build_parser().parse_args()
     setup_logging()
-    {"prepare": cmd_prepare, "stage1": cmd_stage1, "merge": cmd_merge}[args.command](args)
+    {"prepare": cmd_prepare, "stage1": cmd_stage1, "merge": cmd_merge,
+     "split": cmd_split}[args.command](args)
 
 
 if __name__ == "__main__":
