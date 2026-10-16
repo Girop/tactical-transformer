@@ -37,6 +37,10 @@ class Benchmark:
     def from_row(cls, row):
         return cls(row["strat"], Path(row["benchmark"]), Status[row["status"]], float(row["time_s"]), row["solved"] == "True")
 
+    # TODO:
+    # @property
+    # def family(self)
+
 
 def encode_strats(contents: str, max_length: int):
     strats = [

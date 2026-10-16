@@ -12,6 +12,7 @@ from tactics import SpecialTacticsTokens, CATALOG
 from smt_embed import GIN_DIM
 from dataclasses import dataclass
 from utils import seed_everything
+import json
 
 from torch.utils.data import DataLoader
 import torch.nn.functional as F
@@ -25,30 +26,45 @@ class Metrics:
 
     @classmethod
     @torch.no_grad()
-    def collect(cls, model: TacticTransformer, loader: DataLoader, z3path, timeout) -> Metrics:
-        benches = model_strats_on_benchmarks(model, loader, z3path)
+    def collect(cls, model: TacticTransformer, loader: DataLoader, z3path: Path | str, timeout: float) -> Metrics:
+        strat_bench = generate_strategies(model, loader)
+        benches = run_solver_on_benchmarks(strat_bench, z3path, timeout)
         n = len(benches)
         loss = mean_loss(model, loader)
         return cls(loss, sum(par2(b.time_s, b.solved, timeout) for b in benches) / n, sum(b.solved for b in benches) / n)
 
 
-def model_strats_on_benchmarks(model: TacticTransformer, test: DataLoader, z3path: Path | str, timeout=10.0, tqdm_disable=False) -> list[Benchmark]:
-    results = []
+def generate_strategies(model: TacticTransformer, data: DataLoader) -> list[tuple[Path, str]]:
     device = model.device
-    idx = 0
-    for smt, _, bench_data in tqdm(test, desc="Testing", disable=tqdm_disable):
-        strats = model.generate(smt.to(device))
-        for bench, strat in zip(bench_data, strats):
-            strat = CATALOG.tactics_to_text(strat.tolist())
+    strats = []
+    for smt, _, bench in tqdm(data, desc="Generating"):
+        ids = model.generate(smt.to(device)).tolist()
+        strategies = [CATALOG.tactics_to_text(id_) for id_ in ids]
+        strats.extend([(b.benchmark, s) for b, s in zip(bench, strategies)])
+    return strats
+
+# Cache by: (benchmark, strategy, timeout), values: (status, runtime)
+def run_solver_on_benchmarks(benchmarks: list[tuple[Path, str]], z3path: Path | str, timeout=10.0, cache: Path = Path("data/benchmark_cache")) -> list[Benchmark]:
+    cache.mkdir(exist_ok=True)
+    cache_file = cache / "results.json"
+    store: dict = json.loads(cache_file.read_text()) if cache_file.exists() else {}
+
+    results = []
+    for idx, (bench_path, strategy) in enumerate(tqdm(benchmarks, desc="Running")):
+        key = f"{bench_path}|{strategy}|{timeout}"
+        if key in store:
+            status, runtime = store[key]["status"], store[key]["runtime"]
+        else:
             _, status, runtime, _ = SolverRunner(
                 z3path,
-                str(bench.benchmark),
+                str(bench_path),
                 timeout,
                 run_id=idx,
-                z3_strategy=strat
+                z3_strategy=strategy
             ).execute()
-            results.append(Benchmark(strat, bench.benchmark, Status[status], float(runtime), status in ("sat", "unsat")))
-            idx += 1
+            store[key] = {"status": status, "runtime": runtime}
+            cache_file.write_text(json.dumps(store))
+        results.append(Benchmark(strategy, bench_path, Status[status], float(runtime), status in ("sat", "unsat")))
     return results
 
 
