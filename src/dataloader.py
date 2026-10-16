@@ -3,7 +3,8 @@ from pathlib import Path
 import csv
 import warnings
 from enum import Enum, auto
-from random import sample
+from collections import defaultdict
+from random import sample, shuffle
 from typing import Optional, Callable
 
 from transformer import SpecialTacticsTokens, ModelConfig
@@ -13,7 +14,7 @@ from tactics import CATALOG
 
 import torch
 import torch.nn.functional as F
-from torch.utils.data import DataLoader, Dataset, random_split
+from torch.utils.data import DataLoader, Dataset, Subset
 
 
 class Status(Enum):
@@ -56,7 +57,7 @@ class TacticExample(Dataset):
 
     def __init__(self, benchmarks: list[Benchmark], config: ModelConfig):
         encoded = embed_benchmarks({b.benchmark for b in benchmarks})
-        benchmarks = [b for b in benchmarks if b.benchmark in encoded]   # skip files the GIN cannot encode
+        benchmarks = [b for b in benchmarks if b.benchmark in encoded]
         self.smt = [encoded[b.benchmark] for b in benchmarks]
         self.strat = [encode_strats(b.strat, config.max_strat_len) for b in benchmarks]
         self.bench_data = benchmarks
@@ -74,26 +75,12 @@ class TacticExample(Dataset):
         return torch.stack(smts), torch.stack(strats), list(bench_data)
 
 
-def make_splits(benchmarks: TacticExample, batch_size=16, validation: float = 0.1, test: float = 0.1) -> dict[str, DataLoader]:
-    train_size = 1.0 - validation - test
-    train_idx, val_idx, test_idx = random_split(benchmarks, [train_size, validation, test])
-    return {
-        "train": DataLoader(train_idx, batch_size=batch_size, shuffle=True, pin_memory=True, collate_fn=TacticExample.collate_fn),
-        "validation": DataLoader(val_idx, batch_size=batch_size, shuffle=False, pin_memory=True, collate_fn=TacticExample.collate_fn),
-        "test": DataLoader(test_idx, batch_size=batch_size, shuffle=False, pin_memory=True, collate_fn=TacticExample.collate_fn)
-    }
-
-
-# TODO the best shot at improving things is now to generate more, high quality data.
-# a) more best linear strategies found by z3alpha
-# b) sample fairly (round-robin style?) from each of the families
-# c) use much more compute and leave it for longer
-def load_examples(dirpath: Path, predicate: Callable) -> list[Benchmark]:
+def load_examples(dirpath: Path, should_skip: Callable) -> list[Benchmark]:
     assert dirpath.is_dir()
     res = []
     with open(dirpath / "all.csv", newline="") as fp:
         for row in csv.DictReader(fp):
-            if predicate(row):
+            if should_skip(row):
                 continue
             res.append(Benchmark.from_row(row))
     return res
@@ -106,10 +93,41 @@ def load_final_predictions(dirpath: Path, excluded: set[str], config: ModelConfi
     return DataLoader(dataset, batch_size=batch_size, shuffle=False, pin_memory=True, collate_fn=TacticExample.collate_fn)
 
 
-def make_loaders(benchmarks_out: Path, config: ModelConfig, count: Optional[int] = None, excluded: Optional[set[str]] = None) -> dict[str, DataLoader]:
-    should_skip = lambda row: excluded and row["benchmark"] in excluded
+def make_splits(dataset: Subset, batch_size=16, validation: float = 0.1, test: float = 0.1) -> dict[str, DataLoader]:
+    groups = defaultdict(list)
+    for i in range(len(dataset)):
+        _, _, b = dataset[i]
+        groups[b.benchmark].append(i)
+
+    keys = list(groups.keys())
+    shuffle(keys)
+
+    n_test = int(len(keys) * test)
+    n_val = int(len(keys) * validation)
+
+    test_indices = [i for k in keys[:n_test] for i in groups[k]]
+    val_indices = [i for k in keys[n_test:n_test + n_val] for i in groups[k]]
+    train_indices = [i for k in keys[n_test + n_val:] for i in groups[k]]
+
+    return {
+        "train": DataLoader(Subset(dataset, train_indices), batch_size=batch_size, shuffle=True, pin_memory=True, collate_fn=TacticExample.collate_fn),
+        "validation": DataLoader(Subset(dataset, val_indices), batch_size=batch_size, shuffle=False, pin_memory=True, collate_fn=TacticExample.collate_fn),
+        "test": DataLoader(Subset(dataset, test_indices), batch_size=batch_size, shuffle=False, pin_memory=True, collate_fn=TacticExample.collate_fn),
+    }
+
+
+def make_loaders(benchmarks_out: Path, config: ModelConfig, excluded: set[str], count: Optional[int] = None) -> dict[str, DataLoader]:
+    should_skip = lambda row: row["benchmark"] in excluded
     bench_results = load_examples(benchmarks_out, should_skip)
-    if count is not None:
-        bench_results = sample(bench_results, k=count)
+
+    if count is not None and len(bench_results) > count:
+        bench_results= sample(bench_results, count * 4) # TODO quick hack, ensures that we will have more or less enough benchmarks if some fail.
+
+    # TODO GIN is failing in encoding way too many benchmarks.
+    # print("Before: ", len(bench_results))
     dataset = TacticExample(bench_results, config)
+    # print("After: ", len(dataset))
+    if count is not None and count < len(dataset):
+        indices = sample(range(len(dataset)), k=count)
+        dataset = Subset(dataset, indices)
     return make_splits(dataset)

@@ -11,7 +11,7 @@ from smt_select.models.graph.selector import GraphSelector
 from smt_select.models.graph_text.selector import normalize_gin_l2
 from smt_select.representations.graph_rep import _suppress_z3_destructor_noise, build_smt_graph_dict_timeout
 
-# No QF_NIA model ships with smt-select; QF_NRA has (nearly) the same operator vocabulary.
+# TODO: No QF_NIA model ships with smt-select; QF_NRA has (nearly) the same operator vocabulary.
 GIN_MODEL_DIR = Path(__file__).resolve().parents[1] / "smt-select/models/gin_pwc/QF_NRA/seed0"
 GIN_DIM = json.loads((GIN_MODEL_DIR / "config.json").read_text())["hidden_dim"]   # size of every embedding
 
@@ -36,12 +36,12 @@ def embed_benchmarks(paths, cache_dir: Path = Path("data/embedding_cache")) -> d
     """
     cache = Path(cache_dir) / f"{GIN_MODEL_DIR.parent.name}-{GIN_MODEL_DIR.name}.pt"
     # Keyed by str: torch.load(weights_only=True) cannot unpickle Path objects.
-    embeddings = {Path(p): e for p, e in torch.load(cache, weights_only=True).items()} if cache.exists() else {}
+    embeddings = {Path(p): e for p, e in torch.load(cache).items()} if cache.exists() else {}
 
     paths = set(map(Path, paths))
     todo = sorted(paths - embeddings.keys())
     if todo:
-        selector = GraphSelector.load(GIN_MODEL_DIR)   # dropout 0, eval mode
+        selector = GraphSelector.load(GIN_MODEL_DIR)
         for p in tqdm(todo, desc="GIN embeddings"):
             embeddings[p] = gin_embedding(p, selector)
         cache.parent.mkdir(parents=True, exist_ok=True)

@@ -22,6 +22,7 @@ from collections import Counter, defaultdict
 from pathlib import Path
 
 from z3alpha.config import setup_logging
+from utils import seed_everything
 from z3alpha.mcts import LinearStrategySearchRun
 from z3alpha.mcts.param_selection import ParamSelectionConfig
 from z3alpha.mcts.run import MctsConfig
@@ -75,7 +76,7 @@ def build_blocks(benches: list[str], block_size: int) -> list[list[str]]:
 
 def build_tasks(
     all_blocks: list[tuple[str, list[str]]], blocks_dir: Path, base_seed: int,
-    c_uct_choices: list[float], rng: random.Random
+    c_uct_choices: list[float],
 ) -> list[dict]:
     """Assign MCTS hyperparameters to blocks."""
     tasks = []
@@ -85,13 +86,13 @@ def build_tasks(
             "block": str(blocks_dir / f"block-{b:03d}.txt"),
             "logic": logic,
             "seed": base_seed * 100_000 + b,
-            "c_uct": rng.choice(c_uct_choices),
+            "c_uct": random.choice(c_uct_choices),
         })
     return tasks
 
 
 def cmd_prepare(args):
-    rng = random.Random(args.seed)
+    seed_everything(args.seed)
 
     all_blocks: list[tuple[str, list[str]]] = []  # (logic, benches)
 
@@ -112,7 +113,7 @@ def cmd_prepare(args):
         log.error("No benchmarks found — check --smtlib-root and --logics")
         return
 
-    tasks = build_tasks(all_blocks, args.blocks_dir, args.seed, args.c_uct, rng)
+    tasks = build_tasks(all_blocks, args.blocks_dir, args.seed, args.c_uct)
 
     if args.blocks_dir.exists():
         for old in args.blocks_dir.glob("block-*.txt"):
@@ -254,7 +255,7 @@ def cmd_split(args):
         log.error("No logic/family pairs found in all.csv")
         return
 
-    rng = random.Random(args.seed)
+    seed_everything(args.seed)
     excluded: list[str] = []
 
     for logic, families in sorted(logic_families.items()):
@@ -272,7 +273,7 @@ def cmd_split(args):
         for family in sorted(by_family):
             members = by_family[family]
             k = max(1, round(len(members) * args.test_fraction))
-            excluded.extend(rng.sample(members, k))
+            excluded.extend(random.sample(members, k))
             log.info(f"{logic}/{family}: {k} of {len(members)} held out")
 
     if not excluded:
