@@ -138,7 +138,7 @@ class Data:
         train_indices = [i for k in keys[n_val:] for i in by_benchmark[k]]
 
         train_benchmarks = [pool[i] for i in train_indices][:train_size]
-        val_benchmarks = [pool[i] for i in val_indices]
+        val_benchmarks = [pool[i] for i in val_indices][:int(train_size * validation)]
 
         train_ds = TacticExample(embeddings, train_benchmarks, self.config)
         val_ds = TacticExample(embeddings, val_benchmarks, self.config)

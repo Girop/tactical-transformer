@@ -102,7 +102,7 @@ def train_model(model: TacticTransformer, train: DataLoader, validation: DataLoa
             train_loss += loss.item()
 
         loss = mean_loss(model, validation)
-        print(f"epoch {epoch}: train loss - {train_loss / len(train):.4f}, validation loss - {loss:.4f}")
+        print(f"Epoch {epoch}: train loss - {train_loss / len(train):.4f}, validation loss - {loss:.4f}")
         torch.save(model.state_dict(), f'models/{name}-epoch-{epoch}.pt')
     torch.save(model.state_dict(), f'models/{name}.pt')
 
@@ -110,11 +110,12 @@ def train_model(model: TacticTransformer, train: DataLoader, validation: DataLoa
 def make_config():
     return ModelConfig(
         vocab_size=CATALOG.vocab_size(),
-        model_dimension=GIN_DIM,
+        input_dimension=GIN_DIM,
+        model_dimension=1024,
         max_strat_len=101,
-        attention_heads=8,
-        layers=6,
-        feedforward=1024,
+        attention_heads=16,
+        layers=24,
+        feedforward=2048,
     )
 
 
@@ -157,7 +158,7 @@ def load_model(config: ModelConfig, name: str) -> TacticTransformer:
 def exclusion_set(excluded: Path) -> set[str]:
     return set(excluded.read_text().splitlines()) if excluded.exists() else set()
 
-
+# TODO experiment oriented pipelne
 def get_args() -> argparse.Namespace:
     arg = argparse.ArgumentParser()
     arg.add_argument('--data', type=Path, default=Path("experiments/train/all.csv"))
@@ -165,7 +166,7 @@ def get_args() -> argparse.Namespace:
     arg.add_argument('--name', type=str, default="dev")
     arg.add_argument('--epochs', type=int, default=10)
     arg.add_argument('--train-size', type=int, required=True)
-    arg.add_argument('--test-size', type=int, default=100)
+    arg.add_argument('--test-size', type=int, default=500)
     arg.add_argument('--skip-train', action="store_true")
     arg.add_argument('--z3', type=str, default="z3")
     arg.add_argument('--seed', type=int, default=40)
@@ -180,7 +181,7 @@ def main():
     excluded = exclusion_set(args.excluded)
     print("Loading train data...")
     loader = Data(args.data, config)
-    train, val = loader.train_splits(args.train_size, 0.1, excluded)
+    train, val = loader.train_splits(args.train_size, 0.15, excluded)
     print("Loading test data...")
     test = loader.test_split(args.test_size, excluded)
     print(f"Loaded samples: {len(train.dataset)} train, {len(val.dataset)} validation, {len(test.dataset)} test")

@@ -10,7 +10,6 @@ Input doesn't necesarliy need to be couple to output size of GIN, we can add  le
 - Subset of tactics per logic generation.
 - beam search + top-k later.
 - par2 weigthing
-- skip unsolved benchmarks for training split
 
 
 # Benchmarks used in z3alpha paper

@@ -7,6 +7,7 @@ from tactics import SpecialTacticsTokens
 @dataclass(frozen=True)
 class ModelConfig:
     vocab_size: int
+    input_dimension: int
     model_dimension: int
     max_strat_len: int
     attention_heads: int
@@ -22,6 +23,8 @@ class TacticTransformer(nn.Module):
     def __init__(self, config: ModelConfig) -> None:
         super().__init__()
         self.config = config
+
+        self.src_projection = nn.Linear(self.config.input_dimension, self.config.model_dimension)
 
         self.tgt_embedding = nn.Embedding(self.config.vocab_size, self.config.model_dimension)
         self.tgt_pos_embedding = nn.Embedding(self.config.max_strat_len, self.config.model_dimension)
@@ -47,10 +50,9 @@ class TacticTransformer(nn.Module):
         return tok_emb(ids) + pos_emb(pos)
 
 
-    @staticmethod
-    def _encode_src(smt: torch.Tensor) -> torch.Tensor:
-        """The source is a single token, the GIN embedding: [B, model_dimension] -> [B, 1, model_dimension]."""
-        return smt.unsqueeze(1)
+    def _encode_src(self, smt: torch.Tensor) -> torch.Tensor:
+        """The source is a single token, the GIN embedding: [B, input_dimension] -> [B, 1, model_dimension]."""
+        return self.src_projection(smt).unsqueeze(1)
 
 
     def forward(self, smt: torch.Tensor, tgt_ids: torch.Tensor):
