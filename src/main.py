@@ -10,10 +10,11 @@ from tqdm import tqdm
 import argparse
 from tactics import SpecialTacticsTokens, CATALOG
 from smt_embed import GIN_DIM
-from dataclasses import dataclass
 from pydantic import BaseModel
+from collections import defaultdict
 from z3alpha.config import setup_logging
 import logging
+from math import inf
 
 log = logging.getLogger(__name__)
 from utils import seed_everything
@@ -22,6 +23,7 @@ import json
 from torch.utils.data import DataLoader
 import torch.nn.functional as F
 import torch
+import csv
 
 
 def get_args() -> argparse.Namespace:
@@ -35,22 +37,6 @@ def get_args() -> argparse.Namespace:
     return arg.parse_args()
 
 
-@dataclass
-class Metrics:
-    loss: float
-    par2: float
-    solve_rate: float
-
-    @classmethod
-    @torch.no_grad()
-    def collect(cls, model: TacticTransformer, loader: DataLoader, z3path: Path | str, timeout: float) -> Metrics:
-        strat_bench = generate_strategies(model, loader)
-        benches = run_solver_on_benchmarks(strat_bench, z3path, timeout)
-        n = len(benches)
-        loss = mean_loss(model, loader)
-        return cls(loss, sum(par2(b.time_s, b.solved, timeout) for b in benches) / n, sum(b.solved for b in benches) / n)
-
-
 class ExperimentConfig(BaseModel, frozen=True):
     name: str
     epochs: int
@@ -59,6 +45,8 @@ class ExperimentConfig(BaseModel, frozen=True):
     lr: float
     seed: int
     decay: float
+    train_logics: list[str] = []
+    test_logics: list[str] = []
 
     @classmethod
     def from_json(cls, config_path: Path) -> ExperimentConfig:
@@ -121,6 +109,7 @@ def train_model(model: TacticTransformer, train: DataLoader, validation: DataLoa
     device = model.device
     opt = torch.optim.AdamW(model.parameters(), lr=config.lr, weight_decay=config.decay)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=config.epochs)
+    min_loss = inf
     for epoch in range(config.epochs):
         model.train()
         train_loss = 0.0
@@ -134,10 +123,12 @@ def train_model(model: TacticTransformer, train: DataLoader, validation: DataLoa
             opt.step()
             train_loss += loss.item()
 
-        loss = mean_loss(model, validation)
+        val_loss = mean_loss(model, validation)
         scheduler.step()
-        log.info(f"Epoch {epoch}: train loss - {train_loss / len(train):.4f}, validation loss - {loss:.4f}, lr - {scheduler.get_last_lr()[0]:.6f}")
-        torch.save(model.state_dict(), f'models/{config.name}-epoch-{epoch}.pt')
+        log.info(f"Epoch {epoch}: train loss - {train_loss / len(train):.4f}, validation loss - {val_loss:.4f}, lr - {scheduler.get_last_lr()[0]:.6f}")
+        if val_loss < min_loss: # TODO nice metric would come in handy...
+            torch.save(model.state_dict(), f'models/epoch-{epoch}-{config.name}.pt')
+            min_loss = val_loss
     torch.save(model.state_dict(), f'models/{config.name}.pt')
 
 
@@ -145,41 +136,84 @@ def make_config():
     return ModelConfig(
         vocab_size=CATALOG.vocab_size(),
         input_dimension=GIN_DIM,
-        model_dimension=1024,
+        model_dimension=768,
         max_strat_len=101,
-        attention_heads=16,
-        layers=24,
+        attention_heads=8,
+        layers=12,
         feedforward=2048,
     )
-
-
-def get_baseline(test: DataLoader) -> list[Benchmark]:
-    baseline = []
-    for _, _, bench_data in test:
-        baseline.extend(bench_data)
-    return baseline
 
 
 def par2(time_s: float, solved: bool, timeout: float) -> float:
     return time_s if solved else timeout * 2
 
 
+class LogicStats(BaseModel, frozen=True):
+    logic: str
+    model_sr: float
+    baseline_sr: float
+    model_par2: float
+    baseline_par2: float
+    n: int
+
+    @classmethod
+    def from_benchmarks(cls, model_benchmarks: list[Benchmark], base_benchmarks: list[Benchmark], logic: str, timeout: float) -> LogicStats:
+        def sr_par2(benchmarks: list[Benchmark]):
+            n = max(len(benchmarks), 1)
+            return sum(b.solved for b in benchmarks) / n, sum(par2(b.time_s, b.solved, timeout) for b in benchmarks) / n
+        m_sr, m_p2 = sr_par2(model_benchmarks)
+        b_sr, b_p2 = sr_par2(base_benchmarks)
+        return cls(logic=logic, model_sr=m_sr, baseline_sr=b_sr, model_par2=m_p2, baseline_par2=b_p2, n=len(model_benchmarks))
+
+
+class TestResults(BaseModel, frozen=True):
+    overall: LogicStats
+    per_logic: list[LogicStats]
+
+    @classmethod
+    def from_benchmarks(cls, model_results: list[Benchmark], baseline: list[Benchmark], timeout: float = 10.0) -> TestResults:
+        overall = LogicStats.from_benchmarks(model_results, baseline, "Overall", timeout)
+
+        model_by_logic: dict[str, list[Benchmark]] = defaultdict(list)
+        baseline_by_logic: dict[str, list[Benchmark]] = defaultdict(list)
+        for b in model_results:
+            model_by_logic[b.logic].append(b)
+        for b in baseline:
+            baseline_by_logic[b.logic].append(b)
+
+        per_logic = [
+            LogicStats.from_benchmarks(model_by_logic.get(logic, []), baseline_by_logic.get(logic, []), logic, timeout)
+            for logic in sorted(set(model_by_logic) | set(baseline_by_logic))
+        ]
+        return cls(overall=overall, per_logic=per_logic)
+
+    def display(self):
+        rows = [self.overall, *self.per_logic]
+        w = max((len(r.logic) for r in rows), default=10) + 2
+        header = f"{'─' * (w + 42)}"
+        log.info(f"\n{header}")
+        log.info(f"  {'':>{w}} {'Model SR':>9} {'Model P2':>9} {'Base SR':>9} {'Base P2':>9}  {'n':>4}")
+        log.info(header)
+        for r in rows:
+            log.info(f"  {r.logic:>{w}} {r.model_sr:>9.2f} {r.model_par2:>9.2f} {r.baseline_sr:>9.2f} {r.baseline_par2:>9.2f}  {r.n:>4}")
+        log.info(header)
+
+    def to_csv(self, path: Path):
+        rows = [self.overall, *self.per_logic]
+        with open(path, "w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=list(LogicStats.model_fields.keys()))
+            writer.writeheader()
+            for r in rows:
+                writer.writerow(r.model_dump())
+
+
 def run_test(model: TacticTransformer, test: DataLoader, z3path: Path | str, timeout: float = 10.0):
-    metrics = Metrics.collect(model, test, z3path, timeout)
-
-    baseline = get_baseline(test)
-    baseline_sr = sum(b.solved for b in baseline) / len(baseline)
-    baseline_par2 = sum(par2(b.time_s, b.solved, timeout) for b in baseline) / len(baseline)
-
-    # TODO This is not a fair comparison, I'm using supbar solutions for smt problems (transformer is data hungry),
-    # training data is not good representative of peak capabilities of z3alpha.
-    # TODO additionally to that, I should compare average scores from multiple seeds
-    log.info(f"\n{'─' * 44}")
-    log.info(f"  {'':20} {'Model':>5}  {'Z3Alpha':>7}")
-    log.info(f"{'─' * 44}")
-    log.info(f"  {'Solve rate':20} {metrics.solve_rate:>5.2f}  {baseline_sr:>7.2f}")
-    log.info(f"  {'Avg PAR-2':20} {metrics.par2:>5.2f}  {baseline_par2:>7.2f}")
-    log.info(f"{'─' * 44}")
+    baseline = test.dataset.bench_data
+    assert len(baseline) == len(set(b.benchmark for b in baseline))
+    strat_bench = generate_strategies(model, test)
+    model_results = run_solver_on_benchmarks(strat_bench, z3path, timeout)
+    results = TestResults.from_benchmarks(model_results, baseline, timeout)
+    results.display()
 
 
 def load_model(config: ModelConfig, name: str) -> TacticTransformer:
@@ -203,17 +237,18 @@ def main():
     excluded = exclusion_set(args.excluded)
     log.info("Loading train data...")
     loader = Data(args.data, model_config)
-    train, val = loader.train_splits(experiment.train_size, 0.15, excluded)
+    train, val = loader.train_splits(experiment.train_size, 0.15, excluded, experiment.train_logics)
     log.info("Loading test data...")
-    test = loader.test_split(experiment.test_size, excluded)
+    test = loader.test_split(experiment.test_size, excluded, experiment.test_logics)
     log.info(f"Loaded samples: {len(train.dataset)} train, {len(val.dataset)} validation, {len(test.dataset)} test")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = TacticTransformer(model_config).to(device)
     if args.compile:
+        # TODO Doesn't work
         model = torch.compile(model)
     if not args.skip_train:
         train_model(model, train, val, experiment)
-    model = load_model(model_config, args.name).to(device)
+    model = load_model(model_config, experiment.name).to(device)
     run_test(model, test, args.z3)
 
 

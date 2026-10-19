@@ -1,0 +1,11 @@
+{
+    "name": "dev",
+    "epochs": 8,
+    "train_size": 5000,
+    "test_size": 250,
+    "seed": 40,
+    "lr": 3e-4,
+    "decay": 0.01,
+    "train_logics": [],
+    "test_logics": []
+}

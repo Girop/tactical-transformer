@@ -10,7 +10,7 @@ from tqdm import tqdm
 
 from transformer import SpecialTacticsTokens, ModelConfig
 from z3alpha.parser import parse_linear_strategy
-from smt_embed import embed_benchmarks
+from smt_embed import GINEmbedder
 from tactics import CATALOG
 
 import torch
@@ -43,7 +43,7 @@ class Benchmark:
 
     @property
     def logic(self) -> str:
-        return self.benchmark.parts[1]
+        return self.benchmark.parts[2]
 
 
 def encode_strats(contents: str, max_length: int):
@@ -60,7 +60,25 @@ def encode_strats(contents: str, max_length: int):
     repr = torch.tensor(strats, dtype=torch.long)
     return F.pad(repr, (0, max_length - len(strats)), value=SpecialTacticsTokens.PAD_ID.value)
 
-# Cutoff
+
+def load_best_strategies(benchmarks: list[Benchmark], timeout: float) -> dict[Path, Benchmark]:
+    """Loads unique collection of benchmarks along with the best performing strategy, can outperform solutions proposed by z3alpha alone"""
+    per_benchmark: dict[Path, list[Benchmark]] = defaultdict(list)
+    for bench in benchmarks:
+        per_benchmark[bench.benchmark].append(bench)
+
+    baseline = {}
+    for bench_path, candidates in per_benchmark.items():
+        if not candidates:
+            baseline[bench_path] = Benchmark("", bench_path, Status.timeout, timeout, False)
+            continue
+        solved = [c for c in candidates if c.solved]
+        if solved:
+            baseline[bench_path] = min(solved, key=lambda b: b.time_s)
+        else:
+            baseline[bench_path] = min(candidates, key=lambda b: b.time_s)
+    return baseline
+
 
 class TacticExample(Dataset):
 
@@ -84,11 +102,13 @@ class TacticExample(Dataset):
 
 class Data:
 
-    def __init__(self, allcsv: Path, config: ModelConfig, batch_size: int = 16):
+    def __init__(self, allcsv: Path, config: ModelConfig, batch_size: int = 16, timeout: float = 10.0):
         assert allcsv.is_file(), 'Expected single all.csv file'
         self.allcsv = allcsv
         self.config = config
         self.batch_size = batch_size
+        self.embedder = GINEmbedder()
+        self.timeout = timeout
 
     def __load_examples(self, should_skip: Callable) -> list[Benchmark]:
         res = []
@@ -109,7 +129,7 @@ class Data:
             batch = pool[processed:processed + self.batch_size]
             if len(batch) == 0:
                 break
-            batch_emb = embed_benchmarks({b.benchmark for b in batch})
+            batch_emb = self.embedder.embed({b.benchmark for b in batch})
             embeddings.update(batch_emb)
             processed += len(batch)
             pbar.update(len(batch_emb))
@@ -117,8 +137,13 @@ class Data:
         return embeddings
 
 
-    def train_splits(self, train_size: int, validation: float, excluded: set[str]) -> tuple[DataLoader, DataLoader]:
-        pool = self.__load_examples(lambda row: row["benchmark"] not in excluded and not Status[row["status"]].is_solved())
+
+    def train_splits(self, train_size: int, validation: float, excluded: set[str], logics: list[str] = []) -> tuple[DataLoader, DataLoader]:
+        should_skip = lambda row: row["benchmark"] not in excluded and not Status[row["status"]].is_solved()
+        pool = self.__load_examples(should_skip)
+        if logics:
+            pool = [b for b in pool if b.logic in logics]
+
         shuffle(pool)
         total_needed = int(train_size + train_size * validation)
         embeddings = self.__embed(pool, total_needed)
@@ -148,9 +173,13 @@ class Data:
             DataLoader(val_ds, batch_size=self.batch_size, shuffle=False, pin_memory=True, collate_fn=TacticExample.collate_fn)
         )
 
-
-    def test_split(self, size: int, excluded: set[str], batch_size: int = 16) -> DataLoader:
-        pool = self.__load_examples(lambda row: row["benchmark"] not in excluded)
+    def test_split(self, size: int, excluded: set[str], logics: list[str] = [], batch_size: int = 16) -> DataLoader:
+        pool = list(load_best_strategies(
+            self.__load_examples(lambda row: row["benchmark"] not in excluded),
+            self.timeout
+        ).values())
+        if logics:
+            pool = [b for b in pool if b.logic in logics]
         shuffle(pool)
         embeddings = self.__embed(pool, size)
         pool = [p for p in pool if p.benchmark in embeddings]
