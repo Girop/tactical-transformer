@@ -4,8 +4,9 @@ import csv
 import warnings
 from enum import Enum, auto
 from collections import defaultdict
-from random import sample, shuffle
-from typing import Optional, Callable
+from random import shuffle
+from typing import Callable
+from tqdm import tqdm
 
 from transformer import SpecialTacticsTokens, ModelConfig
 from z3alpha.parser import parse_linear_strategy
@@ -14,7 +15,7 @@ from tactics import CATALOG
 
 import torch
 import torch.nn.functional as F
-from torch.utils.data import DataLoader, Dataset, Subset
+from torch.utils.data import DataLoader, Dataset
 
 
 class Status(Enum):
@@ -23,6 +24,9 @@ class Status(Enum):
     timeout = auto()
     unknown = auto()
     error = auto()
+
+    def is_solved(self):
+        return self in (Status.sat, Status.unsat)
 
 
 @dataclass
@@ -37,9 +41,9 @@ class Benchmark:
     def from_row(cls, row):
         return cls(row["strat"], Path(row["benchmark"]), Status[row["status"]], float(row["time_s"]), row["solved"] == "True")
 
-    # TODO:
-    # @property
-    # def family(self)
+    @property
+    def logic(self) -> str:
+        return self.benchmark.parts[1]
 
 
 def encode_strats(contents: str, max_length: int):
@@ -56,13 +60,12 @@ def encode_strats(contents: str, max_length: int):
     repr = torch.tensor(strats, dtype=torch.long)
     return F.pad(repr, (0, max_length - len(strats)), value=SpecialTacticsTokens.PAD_ID.value)
 
+# Cutoff
 
 class TacticExample(Dataset):
 
-    def __init__(self, benchmarks: list[Benchmark], config: ModelConfig):
-        encoded = embed_benchmarks({b.benchmark for b in benchmarks})
-        benchmarks = [b for b in benchmarks if b.benchmark in encoded]
-        self.smt = [encoded[b.benchmark] for b in benchmarks]
+    def __init__(self, smt_encodings: dict[Path, torch.Tensor], benchmarks: list[Benchmark], config: ModelConfig):
+        self.smt = [smt_encodings[b.benchmark] for b in benchmarks]
         self.strat = [encode_strats(b.strat, config.max_strat_len) for b in benchmarks]
         self.bench_data = benchmarks
 
@@ -79,59 +82,87 @@ class TacticExample(Dataset):
         return torch.stack(smts), torch.stack(strats), list(bench_data)
 
 
-def load_examples(dirpath: Path, should_skip: Callable) -> list[Benchmark]:
-    assert dirpath.is_dir()
-    res = []
-    with open(dirpath / "all.csv", newline="") as fp:
-        for row in csv.DictReader(fp):
-            if should_skip(row):
-                continue
-            res.append(Benchmark.from_row(row))
-    return res
+class Data:
+
+    def __init__(self, allcsv: Path, config: ModelConfig, batch_size: int = 16):
+        assert allcsv.is_file(), 'Expected single all.csv file'
+        self.allcsv = allcsv
+        self.config = config
+        self.batch_size = batch_size
+
+    def __load_examples(self, should_skip: Callable) -> list[Benchmark]:
+        res = []
+        with open(self.allcsv, newline="") as fp:
+            for row in csv.DictReader(fp):
+                if should_skip(row):
+                    continue
+                res.append(Benchmark.from_row(row))
+        return res
 
 
-def load_final_predictions(dirpath: Path, excluded: set[str], config: ModelConfig, batch_size: int = 16) -> DataLoader:
-    should_skip = lambda row: row["benchmark"] not in excluded
-    res = load_examples(dirpath, should_skip)
-    dataset = TacticExample(res, config)
-    return DataLoader(dataset, batch_size=batch_size, shuffle=False, pin_memory=True, collate_fn=TacticExample.collate_fn)
+    def __embed(self, pool: list[Benchmark], needed: int) -> dict[Path, torch.Tensor]:
+        processed = 0
+        embeddings: dict[Path, torch.Tensor] = {}
+        pbar = tqdm(total=needed, desc="GIN embedding")
+
+        while len(embeddings) < needed:
+            batch = pool[processed:processed + self.batch_size]
+            if len(batch) == 0:
+                break
+            batch_emb = embed_benchmarks({b.benchmark for b in batch})
+            embeddings.update(batch_emb)
+            processed += len(batch)
+            pbar.update(len(batch_emb))
+        pbar.close()
+        return embeddings
 
 
-def make_splits(dataset: Subset, batch_size=16, validation: float = 0.1, test: float = 0.1) -> dict[str, DataLoader]:
-    groups = defaultdict(list)
-    for i in range(len(dataset)):
-        _, _, b = dataset[i]
-        groups[b.benchmark].append(i)
+    def train_splits(self, train_size: int, validation: float, excluded: set[str]) -> tuple[DataLoader, DataLoader]:
+        pool = self.__load_examples(lambda row: row["benchmark"] not in excluded and not Status[row["status"]].is_solved())
+        shuffle(pool)
+        total_needed = int(train_size + train_size * validation)
+        embeddings = self.__embed(pool, total_needed)
+        pool = [p for p in pool if p.benchmark in embeddings.keys()]
+        if len(pool) < total_needed:
+            warnings.warn(f"Only {len(pool)}/{total_needed} samples survived GIN encoding")
 
-    keys = list(groups.keys())
-    shuffle(keys)
+        by_benchmark = defaultdict(list)
+        for i, b in enumerate(pool):
+            by_benchmark[b.benchmark].append(i)
 
-    n_test = int(len(keys) * test)
-    n_val = int(len(keys) * validation)
+        keys = list(by_benchmark.keys())
+        shuffle(keys)
+        n_val = int(len(keys) * validation)
 
-    test_indices = [i for k in keys[:n_test] for i in groups[k]]
-    val_indices = [i for k in keys[n_test:n_test + n_val] for i in groups[k]]
-    train_indices = [i for k in keys[n_test + n_val:] for i in groups[k]]
+        val_indices = [i for k in keys[:n_val] for i in by_benchmark[k]]
+        train_indices = [i for k in keys[n_val:] for i in by_benchmark[k]]
 
-    return {
-        "train": DataLoader(Subset(dataset, train_indices), batch_size=batch_size, shuffle=True, pin_memory=True, collate_fn=TacticExample.collate_fn),
-        "validation": DataLoader(Subset(dataset, val_indices), batch_size=batch_size, shuffle=False, pin_memory=True, collate_fn=TacticExample.collate_fn),
-        "test": DataLoader(Subset(dataset, test_indices), batch_size=batch_size, shuffle=False, pin_memory=True, collate_fn=TacticExample.collate_fn),
-    }
+        train_benchmarks = [pool[i] for i in train_indices][:train_size]
+        val_benchmarks = [pool[i] for i in val_indices]
+
+        train_ds = TacticExample(embeddings, train_benchmarks, self.config)
+        val_ds = TacticExample(embeddings, val_benchmarks, self.config)
+
+        return (
+            DataLoader(train_ds, batch_size=self.batch_size, shuffle=True, pin_memory=True, collate_fn=TacticExample.collate_fn),
+            DataLoader(val_ds, batch_size=self.batch_size, shuffle=False, pin_memory=True, collate_fn=TacticExample.collate_fn)
+        )
 
 
-def make_loaders(benchmarks_out: Path, config: ModelConfig, excluded: set[str], count: Optional[int] = None) -> dict[str, DataLoader]:
-    should_skip = lambda row: row["benchmark"] in excluded
-    bench_results = load_examples(benchmarks_out, should_skip)
+    def test_split(self, size: int, excluded: set[str], batch_size: int = 16) -> DataLoader:
+        pool = self.__load_examples(lambda row: row["benchmark"] not in excluded)
+        shuffle(pool)
+        embeddings = self.__embed(pool, size)
+        pool = [p for p in pool if p.benchmark in embeddings]
+        if len(pool) < size:
+            warnings.warn(f"Only {len(pool)}/{size} test samples survived GIN encoding")
 
-    if count is not None and len(bench_results) > count:
-        bench_results= sample(bench_results, count * 4) # TODO quick hack, ensures that we will have more or less enough benchmarks if some fail.
+        dataset = TacticExample(embeddings, pool[:size], self.config)
+        return DataLoader(
+            dataset,
+            batch_size=batch_size,
+            shuffle=False,
+            pin_memory=True,
+            collate_fn=TacticExample.collate_fn
+        )
 
-    # TODO GIN is failing in encoding way too many benchmarks.
-    # print("Before: ", len(bench_results))
-    dataset = TacticExample(bench_results, config)
-    # print("After: ", len(dataset))
-    if count is not None and count < len(dataset):
-        indices = sample(range(len(dataset)), k=count)
-        dataset = Subset(dataset, indices)
-    return make_splits(dataset)

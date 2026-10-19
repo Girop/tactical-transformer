@@ -4,7 +4,6 @@ from pathlib import Path
 
 import torch
 from torch_geometric.data import Batch
-from tqdm import tqdm
 
 from smt_select.models.graph.common import graph_dict_to_gin_data
 from smt_select.models.graph.selector import GraphSelector
@@ -42,8 +41,11 @@ def embed_benchmarks(paths, cache_dir: Path = Path("data/embedding_cache")) -> d
     todo = sorted(paths - embeddings.keys())
     if todo:
         selector = GraphSelector.load(GIN_MODEL_DIR)
-        for p in tqdm(todo, desc="GIN embeddings"):
-            embeddings[p] = gin_embedding(p, selector)
+        for p in todo:
+            try:
+                embeddings[p] = gin_embedding(p, selector)
+            except: # TODO quickhack
+                embeddings[p] = None
         cache.parent.mkdir(parents=True, exist_ok=True)
         torch.save({str(p): e for p, e in embeddings.items()}, cache)
 

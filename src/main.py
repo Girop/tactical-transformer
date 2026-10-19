@@ -2,7 +2,7 @@ import warnings
 
 warnings.filterwarnings("ignore", category=FutureWarning)
 
-from dataloader import make_loaders, Status, Benchmark
+from dataloader import Data, Status, Benchmark
 from pathlib import Path
 from transformer import TacticTransformer, ModelConfig
 from z3alpha.evaluator import SolverRunner
@@ -43,6 +43,7 @@ def generate_strategies(model: TacticTransformer, data: DataLoader) -> list[tupl
         strats.extend([(b.benchmark, s) for b, s in zip(bench, strategies)])
     return strats
 
+
 # Cache by: (benchmark, strategy, timeout), values: (status, runtime)
 def run_solver_on_benchmarks(benchmarks: list[tuple[Path, str]], z3path: Path | str, timeout=10.0, cache: Path = Path("data/benchmark_cache")) -> list[Benchmark]:
     cache.mkdir(exist_ok=True)
@@ -50,7 +51,7 @@ def run_solver_on_benchmarks(benchmarks: list[tuple[Path, str]], z3path: Path | 
     store: dict = json.loads(cache_file.read_text()) if cache_file.exists() else {}
 
     results = []
-    for idx, (bench_path, strategy) in enumerate(tqdm(benchmarks, desc="Running")):
+    for idx, (bench_path, strategy) in enumerate(tqdm(benchmarks, desc="Testing")):
         key = f"{bench_path}|{strategy}|{timeout}"
         if key in store:
             status, runtime = store[key]["status"], store[key]["runtime"]
@@ -101,7 +102,7 @@ def train_model(model: TacticTransformer, train: DataLoader, validation: DataLoa
             train_loss += loss.item()
 
         loss = mean_loss(model, validation)
-        print(f"epoch {epoch}: train loss - {train_loss / len(train):.4f}, validation loss - {loss:.4f}") # avg par2 - {metrics.par2:.2f}, solve rate % - {metrics.solve_rate:.2f}")
+        print(f"epoch {epoch}: train loss - {train_loss / len(train):.4f}, validation loss - {loss:.4f}")
         torch.save(model.state_dict(), f'models/{name}-epoch-{epoch}.pt')
     torch.save(model.state_dict(), f'models/{name}.pt')
 
@@ -135,9 +136,15 @@ def run_test(model: TacticTransformer, test: DataLoader, z3path: Path | str, tim
     baseline_sr = sum(b.solved for b in baseline) / len(baseline)
     baseline_par2 = sum(par2(b.time_s, b.solved, timeout) for b in baseline) / len(baseline)
 
-    print("=" * 10 + "\nRun summary, Model vs Z3Alpha:")
-    print(f"Solve rate: {metrics.solve_rate:.2f}\t{baseline_sr:.2f}")
-    print(f"Avg par2: {metrics.par2:.2f}\t{baseline_par2:.2f}")
+    # TODO This is not a fair comparison, I'm using supbar solutions for smt problems (transformer is data hungry),
+    # training data is not good representative of peak capabilities of z3alpha.
+    # TODO additionally to that, I should compare average scores from multiple seeds
+    print(f"\n{'─' * 44}")
+    print(f"  {'':20} {'Model':>5}  {'Z3Alpha':>7}")
+    print(f"{'─' * 44}")
+    print(f"  {'Solve rate':20} {metrics.solve_rate:>5.2f}  {baseline_sr:>7.2f}")
+    print(f"  {'Avg PAR-2':20} {metrics.par2:>5.2f}  {baseline_par2:>7.2f}")
+    print(f"{'─' * 44}")
 
 
 def load_model(config: ModelConfig, name: str) -> TacticTransformer:
@@ -153,11 +160,12 @@ def exclusion_set(excluded: Path) -> set[str]:
 
 def get_args() -> argparse.Namespace:
     arg = argparse.ArgumentParser()
-    arg.add_argument('--data', type=Path, default=Path("experiments/train"))
+    arg.add_argument('--data', type=Path, default=Path("experiments/train/all.csv"))
     arg.add_argument('--excluded', type=Path, default=Path("data/excluded.txt"))
     arg.add_argument('--name', type=str, default="dev")
     arg.add_argument('--epochs', type=int, default=10)
-    arg.add_argument('--sample-count', type=int, default=None)
+    arg.add_argument('--train-size', type=int, required=True)
+    arg.add_argument('--test-size', type=int, default=100)
     arg.add_argument('--skip-train', action="store_true")
     arg.add_argument('--z3', type=str, default="z3")
     arg.add_argument('--seed', type=int, default=40)
@@ -170,9 +178,11 @@ def main():
     seed_everything(args.seed)
     config = make_config()
     excluded = exclusion_set(args.excluded)
-    print("Loading data...")
-    loaders = make_loaders(args.data, config, excluded, args.sample_count)
-    train, val, test = loaders["train"], loaders["validation"], loaders["test"]
+    print("Loading train data...")
+    loader = Data(args.data, config)
+    train, val = loader.train_splits(args.train_size, 0.1, excluded)
+    print("Loading test data...")
+    test = loader.test_split(args.test_size, excluded)
     print(f"Loaded samples: {len(train.dataset)} train, {len(val.dataset)} validation, {len(test.dataset)} test")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = TacticTransformer(config).to(device)
