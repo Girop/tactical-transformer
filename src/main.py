@@ -11,12 +11,29 @@ import argparse
 from tactics import SpecialTacticsTokens, CATALOG
 from smt_embed import GIN_DIM
 from dataclasses import dataclass
+from pydantic import BaseModel
+from z3alpha.config import setup_logging
+import logging
+
+log = logging.getLogger(__name__)
 from utils import seed_everything
 import json
 
 from torch.utils.data import DataLoader
 import torch.nn.functional as F
 import torch
+
+
+def get_args() -> argparse.Namespace:
+    arg = argparse.ArgumentParser()
+    arg.add_argument('--data', type=Path, default=Path("experiments/train/all.csv"))
+    arg.add_argument('--excluded', type=Path, default=Path("data/excluded.txt"))
+    arg.add_argument('--experiment', type=Path, default=Path("experiment.json"))
+    arg.add_argument('--skip-train', action="store_true")
+    arg.add_argument('--z3', type=str, default="z3")
+    arg.add_argument('--compile', action="store_true", help="torch.compile the model")
+    return arg.parse_args()
+
 
 @dataclass
 class Metrics:
@@ -32,6 +49,21 @@ class Metrics:
         n = len(benches)
         loss = mean_loss(model, loader)
         return cls(loss, sum(par2(b.time_s, b.solved, timeout) for b in benches) / n, sum(b.solved for b in benches) / n)
+
+
+class ExperimentConfig(BaseModel, frozen=True):
+    name: str
+    epochs: int
+    train_size: int
+    test_size: int
+    lr: float
+    seed: int
+    decay: float
+
+    @classmethod
+    def from_json(cls, config_path: Path) -> ExperimentConfig:
+        assert config_path.is_file(), "Experiment config file required"
+        return cls.model_validate_json(config_path.read_text())
 
 
 def generate_strategies(model: TacticTransformer, data: DataLoader) -> list[tuple[Path, str]]:
@@ -64,7 +96,7 @@ def run_solver_on_benchmarks(benchmarks: list[tuple[Path, str]], z3path: Path | 
                 z3_strategy=strategy
             ).execute()
             store[key] = {"status": status, "runtime": runtime}
-            cache_file.write_text(json.dumps(store))
+            cache_file.write_text(json.dumps(store, indent=2))
         results.append(Benchmark(strategy, bench_path, Status[status], float(runtime), status in ("sat", "unsat")))
     return results
 
@@ -84,11 +116,12 @@ def mean_loss(model: TacticTransformer, loader: DataLoader) -> float:
     return total / count
 
 
-def train_model(model: TacticTransformer, train: DataLoader, validation: DataLoader, name: str, epochs: int, lr=3e-4):
+def train_model(model: TacticTransformer, train: DataLoader, validation: DataLoader, config: ExperimentConfig):
     Path("models").mkdir(exist_ok=True)
     device = model.device
-    opt = torch.optim.AdamW(model.parameters(), lr=lr)
-    for epoch in range(epochs):
+    opt = torch.optim.AdamW(model.parameters(), lr=config.lr, weight_decay=config.decay)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=config.epochs)
+    for epoch in range(config.epochs):
         model.train()
         train_loss = 0.0
         for smt, strat, _ in tqdm(train, desc=f"Epoch {epoch}"):
@@ -102,9 +135,10 @@ def train_model(model: TacticTransformer, train: DataLoader, validation: DataLoa
             train_loss += loss.item()
 
         loss = mean_loss(model, validation)
-        print(f"Epoch {epoch}: train loss - {train_loss / len(train):.4f}, validation loss - {loss:.4f}")
-        torch.save(model.state_dict(), f'models/{name}-epoch-{epoch}.pt')
-    torch.save(model.state_dict(), f'models/{name}.pt')
+        scheduler.step()
+        log.info(f"Epoch {epoch}: train loss - {train_loss / len(train):.4f}, validation loss - {loss:.4f}, lr - {scheduler.get_last_lr()[0]:.6f}")
+        torch.save(model.state_dict(), f'models/{config.name}-epoch-{epoch}.pt')
+    torch.save(model.state_dict(), f'models/{config.name}.pt')
 
 
 def make_config():
@@ -140,12 +174,12 @@ def run_test(model: TacticTransformer, test: DataLoader, z3path: Path | str, tim
     # TODO This is not a fair comparison, I'm using supbar solutions for smt problems (transformer is data hungry),
     # training data is not good representative of peak capabilities of z3alpha.
     # TODO additionally to that, I should compare average scores from multiple seeds
-    print(f"\n{'─' * 44}")
-    print(f"  {'':20} {'Model':>5}  {'Z3Alpha':>7}")
-    print(f"{'─' * 44}")
-    print(f"  {'Solve rate':20} {metrics.solve_rate:>5.2f}  {baseline_sr:>7.2f}")
-    print(f"  {'Avg PAR-2':20} {metrics.par2:>5.2f}  {baseline_par2:>7.2f}")
-    print(f"{'─' * 44}")
+    log.info(f"\n{'─' * 44}")
+    log.info(f"  {'':20} {'Model':>5}  {'Z3Alpha':>7}")
+    log.info(f"{'─' * 44}")
+    log.info(f"  {'Solve rate':20} {metrics.solve_rate:>5.2f}  {baseline_sr:>7.2f}")
+    log.info(f"  {'Avg PAR-2':20} {metrics.par2:>5.2f}  {baseline_par2:>7.2f}")
+    log.info(f"{'─' * 44}")
 
 
 def load_model(config: ModelConfig, name: str) -> TacticTransformer:
@@ -158,38 +192,28 @@ def load_model(config: ModelConfig, name: str) -> TacticTransformer:
 def exclusion_set(excluded: Path) -> set[str]:
     return set(excluded.read_text().splitlines()) if excluded.exists() else set()
 
-# TODO experiment oriented pipelne
-def get_args() -> argparse.Namespace:
-    arg = argparse.ArgumentParser()
-    arg.add_argument('--data', type=Path, default=Path("experiments/train/all.csv"))
-    arg.add_argument('--excluded', type=Path, default=Path("data/excluded.txt"))
-    arg.add_argument('--name', type=str, default="dev")
-    arg.add_argument('--epochs', type=int, default=10)
-    arg.add_argument('--train-size', type=int, required=True)
-    arg.add_argument('--test-size', type=int, default=500)
-    arg.add_argument('--skip-train', action="store_true")
-    arg.add_argument('--z3', type=str, default="z3")
-    arg.add_argument('--seed', type=int, default=40)
-    return arg.parse_args()
-
 
 def main():
+    setup_logging()
     args = get_args()
-    print(f"Training model: {args.name}")
-    seed_everything(args.seed)
-    config = make_config()
+    experiment = ExperimentConfig.from_json(args.experiment)
+    log.info(f"Training model: {experiment.name}")
+    seed_everything(experiment.seed)
+    model_config = make_config()
     excluded = exclusion_set(args.excluded)
-    print("Loading train data...")
-    loader = Data(args.data, config)
-    train, val = loader.train_splits(args.train_size, 0.15, excluded)
-    print("Loading test data...")
-    test = loader.test_split(args.test_size, excluded)
-    print(f"Loaded samples: {len(train.dataset)} train, {len(val.dataset)} validation, {len(test.dataset)} test")
+    log.info("Loading train data...")
+    loader = Data(args.data, model_config)
+    train, val = loader.train_splits(experiment.train_size, 0.15, excluded)
+    log.info("Loading test data...")
+    test = loader.test_split(experiment.test_size, excluded)
+    log.info(f"Loaded samples: {len(train.dataset)} train, {len(val.dataset)} validation, {len(test.dataset)} test")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = TacticTransformer(config).to(device)
+    model = TacticTransformer(model_config).to(device)
+    if args.compile:
+        model = torch.compile(model)
     if not args.skip_train:
-        train_model(model, train, val, args.name, args.epochs)
-    model = load_model(config, args.name).to(device)
+        train_model(model, train, val, experiment)
+    model = load_model(model_config, args.name).to(device)
     run_test(model, test, args.z3)
 
 

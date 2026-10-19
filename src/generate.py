@@ -225,18 +225,18 @@ def cmd_merge(args):
         by_bench[row[3]].append(row)
     per_bench = [len({r[0] for r in b}) for b in by_bench.values()]
 
-    print(f"\nRows: {len(rows)}")
-    print(f"Status: {dict(Counter(r[4] for r in rows))}")
-    print(f"Distinct strategies: {len({r[0] for r in rows})}, benchmarks: {len(by_bench)}")
-    print(f"Strategies per benchmark: min {min(per_bench)}, median {statistics.median(per_bench):.0f}, max {max(per_bench)}")
-    print(f"Benchmarks solved by at least one strategy: {sum(any(r[6] for r in b) for b in by_bench.values())}")
+    log.info(f"Rows: {len(rows)}")
+    log.info(f"Status: {dict(Counter(r[4] for r in rows))}")
+    log.info(f"Distinct strategies: {len({r[0] for r in rows})}, benchmarks: {len(by_bench)}")
+    log.info(f"Strategies per benchmark: min {min(per_bench)}, median {statistics.median(per_bench):.0f}, max {max(per_bench)}")
+    log.info(f"Benchmarks solved by at least one strategy: {sum(any(r[6] for r in b) for b in by_bench.values())}")
 
-    print("\nSolve rate by family:")
+    log.info("Solve rate by family:")
     by_fam: dict[str, list] = defaultdict(list)
     for r in rows:
         by_fam[r[2] or "?"].append(r[6])
     for fam in sorted(by_fam):
-        print(f"  {fam:40s} {statistics.mean(by_fam[fam]):.3f}  ({len(by_fam[fam])} rows)")
+        log.info(f"  {fam:40s} {statistics.mean(by_fam[fam]):.3f}  ({len(by_fam[fam])} rows)")
 
     log.info(f"Wrote {args.train / 'all.csv'}")
 
