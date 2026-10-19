@@ -1,5 +1,7 @@
 """SMT-Select embeddings of SMT-LIB files: a frozen GIN over the term graph."""
 import json
+import os
+from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
 import torch
@@ -14,18 +16,38 @@ from smt_select.representations.graph_rep import _suppress_z3_destructor_noise, 
 GIN_MODEL_DIR = Path(__file__).resolve().parents[1] / "smt-select/models/gin_pwc/QF_NRA/seed0"
 GIN_DIM = json.loads((GIN_MODEL_DIR / "config.json").read_text())["hidden_dim"]   # size of every embedding
 
+GIN_BATCH_SIZE = 128
 
-def gin_embedding(path: Path, selector: GraphSelector) -> torch.Tensor | None:
-    """L2-normalised graph embedding, or None if the file cannot be encoded."""
-    graph_dict = build_smt_graph_dict_timeout(path, selector.graph_timeout)
-    data = graph_dict_to_gin_data(graph_dict, selector.vocabulary) if graph_dict is not None else None
-    del graph_dict
+
+def _build_graph(args: tuple[Path, int]) -> dict | None:
+    """Worker function for parallel graph construction."""
+    path, timeout = args
+    try:
+        return build_smt_graph_dict_timeout(path, timeout)
+    except:
+        return None
+
+
+def _graph_to_data(graph_dict, vocabulary):
+    if graph_dict is None:
+        return None
+    data = graph_dict_to_gin_data(graph_dict, vocabulary)
     if data is None or data.num_nodes == 0:
         _suppress_z3_destructor_noise()
         return None
-    with torch.no_grad():
-        emb = selector.model.forward_embedding(Batch.from_data_list([data]).to(selector.device))
-    return torch.from_numpy(normalize_gin_l2(emb[0].cpu().numpy()))
+    return data
+
+
+def _batched_gin_forward(data_items: list, selector: GraphSelector) -> list[torch.Tensor]:
+    """Run GIN inference in batches."""
+    results = []
+    for i in range(0, len(data_items), GIN_BATCH_SIZE):
+        batch = Batch.from_data_list(data_items[i:i + GIN_BATCH_SIZE]).to(selector.device)
+        with torch.no_grad():
+            embs = selector.model.forward_embedding(batch)
+        for emb in embs:
+            results.append(torch.from_numpy(normalize_gin_l2(emb.cpu().numpy())))
+    return results
 
 
 def embed_benchmarks(paths, cache_dir: Path = Path("data/embedding_cache")) -> dict[Path, torch.Tensor]:
@@ -41,11 +63,30 @@ def embed_benchmarks(paths, cache_dir: Path = Path("data/embedding_cache")) -> d
     todo = sorted(paths - embeddings.keys())
     if todo:
         selector = GraphSelector.load(GIN_MODEL_DIR)
-        for p in todo:
-            try:
-                embeddings[p] = gin_embedding(p, selector)
-            except: # TODO quickhack
+        n_workers = min(len(todo), os.cpu_count() or 1)
+
+        # Parallel graph construction
+        work = [(p, selector.graph_timeout) for p in todo]
+        with ProcessPoolExecutor(max_workers=n_workers) as pool:
+            graph_dicts = list(pool.map(_build_graph, work))
+
+        # Convert to PyG data objects
+        valid_paths = []
+        valid_data = []
+        for p, graph_dict in zip(todo, graph_dicts):
+            data = _graph_to_data(graph_dict, selector.vocabulary)
+            if data is not None:
+                valid_paths.append(p)
+                valid_data.append(data)
+            else:
                 embeddings[p] = None
+
+        # Batched GIN forward pass
+        if valid_data:
+            embs = _batched_gin_forward(valid_data, selector)
+            for p, emb in zip(valid_paths, embs):
+                embeddings[p] = emb
+
         cache.parent.mkdir(parents=True, exist_ok=True)
         torch.save({str(p): e for p, e in embeddings.items()}, cache)
 
