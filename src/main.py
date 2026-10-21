@@ -10,7 +10,9 @@ from tqdm import tqdm
 import argparse
 from tactics import SpecialTacticsTokens, CATALOG
 from smt_embed import GIN_DIM
-from pydantic import BaseModel
+from pydantic import TypeAdapter
+from pydantic.dataclasses import dataclass
+from dataclasses import asdict
 from collections import defaultdict
 from z3alpha.config import setup_logging
 import logging
@@ -23,7 +25,7 @@ import json
 from torch.utils.data import DataLoader
 import torch.nn.functional as F
 import torch
-import csv
+import torch.nn as nn
 
 
 def get_args() -> argparse.Namespace:
@@ -37,7 +39,8 @@ def get_args() -> argparse.Namespace:
     return arg.parse_args()
 
 
-class ExperimentConfig(BaseModel, frozen=True):
+@dataclass(frozen=True)
+class ExperimentConfig:
     name: str
     epochs: int
     train_size: int
@@ -45,13 +48,14 @@ class ExperimentConfig(BaseModel, frozen=True):
     lr: float
     seed: int
     decay: float
-    train_logics: list[str] = []
-    test_logics: list[str] = []
+    train_logics: list[str]
+    test_logics: list[str]
+    loss: str
 
     @classmethod
     def from_json(cls, config_path: Path) -> ExperimentConfig:
         assert config_path.is_file(), "Experiment config file required"
-        return cls.model_validate_json(config_path.read_text())
+        return TypeAdapter(cls).validate_json(config_path.read_text())
 
 
 def generate_strategies(model: TacticTransformer, data: DataLoader) -> list[tuple[Path, str]]:
@@ -104,20 +108,49 @@ def mean_loss(model: TacticTransformer, loader: DataLoader) -> float:
     return total / count
 
 
-def train_model(model: TacticTransformer, train: DataLoader, validation: DataLoader, config: ExperimentConfig):
+class Par2Loss(nn.Module):
+    def __init__(self, timeout: float, pad_id: int):
+        super().__init__()
+        self.timeout = timeout
+        self.ce = nn.CrossEntropyLoss(ignore_index=pad_id, reduction='none')
+
+    def forward(self, logits: torch.Tensor, targets: torch.Tensor, benchmarks: list) -> torch.Tensor:
+        per_sample = self.ce(logits.transpose(1, 2), targets).mean(dim=1)
+        weights = torch.tensor([1.0 - b.time_s / self.timeout if b.solved else 0.0 for b in benchmarks], device=logits.device)
+        return (per_sample * weights).mean()
+
+
+class CELoss(nn.Module):
+    def __init__(self, pad_id: int):
+        super().__init__()
+        self.ce = nn.CrossEntropyLoss(ignore_index=pad_id)
+
+    def forward(self, logits: torch.Tensor, targets: torch.Tensor, benchmarks: list) -> torch.Tensor:
+        return self.ce(logits.transpose(1, 2), targets)
+
+
+LOSS_FUNCTIONS = {
+    "par2": lambda timeout, pad_id: Par2Loss(timeout, pad_id),
+    "ce": lambda timeout, pad_id: CELoss(pad_id),
+}
+
+
+def train_model(model: TacticTransformer, train: DataLoader, validation: DataLoader, config: ExperimentConfig, timeout: float = 10.0):
     Path("models").mkdir(exist_ok=True)
     device = model.device
     opt = torch.optim.AdamW(model.parameters(), lr=config.lr, weight_decay=config.decay)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=config.epochs)
+    assert config.loss in LOSS_FUNCTIONS, f"Unknown loss: {config.loss}, expected one of {list(LOSS_FUNCTIONS)}"
+    criterion = LOSS_FUNCTIONS[config.loss](timeout, SpecialTacticsTokens.PAD_ID)
     min_loss = inf
     for epoch in range(config.epochs):
         model.train()
         train_loss = 0.0
-        for smt, strat, _ in tqdm(train, desc=f"Epoch {epoch}"):
+        for smt, strat, bench in tqdm(train, desc=f"Epoch {epoch}"):
             opt.zero_grad()
             smt, strat = smt.to(device), strat.to(device)
             logits = model(smt, strat[:, :-1])
-            loss = F.cross_entropy(logits.transpose(1, 2), strat[:, 1:], ignore_index=SpecialTacticsTokens.PAD_ID)
+            loss = criterion(logits, strat[:, 1:], bench)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             opt.step()
@@ -148,7 +181,8 @@ def par2(time_s: float, solved: bool, timeout: float) -> float:
     return time_s if solved else timeout * 2
 
 
-class LogicStats(BaseModel, frozen=True):
+@dataclass(frozen=True)
+class LogicStats:
     logic: str
     model_sr: float
     baseline_sr: float
@@ -166,7 +200,8 @@ class LogicStats(BaseModel, frozen=True):
         return cls(logic=logic, model_sr=m_sr, baseline_sr=b_sr, model_par2=m_p2, baseline_par2=b_p2, n=len(model_benchmarks))
 
 
-class TestResults(BaseModel, frozen=True):
+@dataclass(frozen=True)
+class TestResults:
     overall: LogicStats
     per_logic: list[LogicStats]
 
@@ -198,22 +233,23 @@ class TestResults(BaseModel, frozen=True):
             log.info(f"  {r.logic:>{w}} {r.model_sr:>9.2f} {r.model_par2:>9.2f} {r.baseline_sr:>9.2f} {r.baseline_par2:>9.2f}  {r.n:>4}")
         log.info(header)
 
-    def to_csv(self, path: Path):
-        rows = [self.overall, *self.per_logic]
-        with open(path, "w", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=list(LogicStats.model_fields.keys()))
-            writer.writeheader()
-            for r in rows:
-                writer.writerow(r.model_dump())
+
+    def to_json(self, path: Path, model: ModelConfig, experiment: ExperimentConfig):
+        data = {
+            "model": str(model),
+            "experiment": str(experiment),
+            "overall": asdict(self.overall),
+            "per_logic": [asdict(r) for r in self.per_logic],
+        }
+        path.write_text(json.dumps(data, indent=2))
 
 
-def run_test(model: TacticTransformer, test: DataLoader, z3path: Path | str, timeout: float = 10.0):
+def run_test(model: TacticTransformer, test: DataLoader, z3path: Path | str, timeout: float = 10.0) -> TestResults:
     baseline = test.dataset.bench_data
     assert len(baseline) == len(set(b.benchmark for b in baseline))
     strat_bench = generate_strategies(model, test)
     model_results = run_solver_on_benchmarks(strat_bench, z3path, timeout)
-    results = TestResults.from_benchmarks(model_results, baseline, timeout)
-    results.display()
+    return TestResults.from_benchmarks(model_results, baseline, timeout)
 
 
 def load_model(config: ModelConfig, name: str) -> TacticTransformer:
@@ -249,7 +285,9 @@ def main():
     if not args.skip_train:
         train_model(model, train, val, experiment)
     model = load_model(model_config, experiment.name).to(device)
-    run_test(model, test, args.z3)
+    results = run_test(model, test, args.z3)
+    results.display()
+    results.to_json(Path(f"experiment-{experiment.name}-out.json"), model_config, experiment)
 
 
 if __name__ == '__main__':
