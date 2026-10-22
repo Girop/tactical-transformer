@@ -44,7 +44,6 @@ class ExperimentConfig:
     train_logics: list[str]
     test_logics: list[str]
     loss: str
-    data_selection: str = "all"
     # Training
     label_smoothing: float = 0.0
     scheduler: str = "cosine"

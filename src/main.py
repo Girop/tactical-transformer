@@ -35,7 +35,7 @@ def load_model(config: ModelConfig, name: str) -> TacticTransformer:
     return model
 
 
-def exclusion_set(excluded: Path) -> set[str]:
+def testing_set(excluded: Path) -> set[str]:
     return set(excluded.read_text().splitlines()) if excluded.exists() else set()
 
 
@@ -46,10 +46,10 @@ def main():
     log.info(f"Training model: {experiment.name}")
     seed_everything(experiment.seed)
     model_config = ModelConfig.default()
-    excluded = exclusion_set(args.excluded)
+    excluded = testing_set(args.excluded)
     log.info("Loading train data...")
     loader = Data(args.data, model_config)
-    train, val = loader.train_splits(experiment.train_size, 0.15, excluded, experiment.train_logics, experiment.data_selection)
+    train, val = loader.train_splits(experiment.train_size, 0.15, excluded, experiment.train_logics)
     log.info("Loading test data...")
     test_loader = loader.test_split(experiment.test_size, excluded, experiment.test_logics)
     log.info(f"Loaded samples: {len(train.dataset)} train, {len(val.dataset)} validation, {len(test_loader.dataset)} test")

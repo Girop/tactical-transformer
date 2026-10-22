@@ -138,13 +138,12 @@ class Data:
 
 
 
-    def train_splits(self, train_size: int, validation: float, excluded: set[str], logics: list[str] = [], data_selection: str = "all") -> tuple[DataLoader, DataLoader]:
+    def train_splits(self, train_size: int, validation: float, excluded: set[str], logics: list[str] = []) -> tuple[DataLoader, DataLoader]:
         should_skip = lambda row: row["benchmark"] in excluded or not Status[row["status"]].is_solved()
         pool = self.__load_examples(should_skip)
         if logics:
             pool = [b for b in pool if b.logic in logics]
-        if data_selection == "best":
-            pool = list(load_best_strategies(pool, self.timeout).values())
+        pool = list(load_best_strategies(pool, self.timeout).values())
 
         shuffle(pool)
         total_needed = int(train_size + train_size * validation)
