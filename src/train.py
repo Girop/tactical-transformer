@@ -4,7 +4,6 @@ from pathlib import Path
 from transformer import TacticTransformer
 from math import inf
 from torch.utils.data import DataLoader
-import torch.nn.functional as F
 import torch
 import torch.nn as nn
 from tqdm import tqdm
@@ -38,20 +37,6 @@ class CELoss(nn.Module):
         return self.ce(logits.transpose(1, 2), targets)
 
 
-@torch.no_grad()
-def mean_loss(model: TacticTransformer, loader: DataLoader) -> float:
-    model.eval()
-    total = 0.0
-    count = 0
-    for smt, strat, _ in loader:
-        smt, strat = smt.to(model.device), strat.to(model.device)
-        logits = model(smt, strat[:, :-1])
-        bs = smt.size(0)
-        total += F.cross_entropy(logits.transpose(1, 2), strat[:, 1:], ignore_index=SpecialTacticsTokens.PAD_ID).item() * bs
-        count += bs
-    return total / count
-
-
 class Trainer:
 
     def __init__(
@@ -64,6 +49,7 @@ class Trainer:
         model_storage: Path = Path("models")
     ) -> None:
         self.model = model
+        self.device = model.device
         self.train = train
         self.validation = validation
         self.config = config
@@ -72,13 +58,24 @@ class Trainer:
         model_storage.mkdir(exist_ok=True)
 
 
+    @torch.no_grad()
+    def __validation_loss(self, criterion) -> float:
+        self.model.eval()
+        total = 0
+        for smt, strat, bench in self.validation:
+            smt, strat = smt.to(self.device), strat.to(self.device)
+            logits = self.model(smt, strat[:, :-1])
+            total += criterion(logits, strat[:, 1:], bench)
+        return total / max(len(self.validation), 1)
+
+
     def __criterion(self):
         pad_id, ls = SpecialTacticsTokens.PAD_ID, self.config.label_smoothing
         if self.config.loss == "par2":
             return Par2Loss(self.timeout, pad_id, ls)
         if self.config.loss == "ce":
             return CELoss(pad_id, ls)
-        raise ValueError(f"Unknown loss: {self.config.loss}")
+        raise ValueError(f"Unknown loss function: {self.config.loss}")
 
 
     def __scheduler(self, optimizer):
@@ -119,7 +116,6 @@ class Trainer:
 
 
     def __train(self):
-        device = self.model.device
         opt = torch.optim.AdamW(self.model.parameters(), lr=self.config.lr, weight_decay=self.config.decay)
         criterion = self.__criterion()
         scheduler = self.__scheduler(opt)
@@ -131,7 +127,7 @@ class Trainer:
 
             for smt, strat, bench in tqdm(self.train, desc=f"Epoch {epoch}"):
                 opt.zero_grad()
-                smt, strat = smt.to(device), strat.to(device)
+                smt, strat = smt.to(self.device), strat.to(self.device)
                 logits = self.model(smt, strat[:, :-1])
                 loss = criterion(logits, strat[:, 1:], bench)
                 loss.backward()
@@ -140,7 +136,7 @@ class Trainer:
                 scheduler.step()
                 train_loss += loss.item()
 
-            val_loss = mean_loss(self.model, self.validation)
+            val_loss = self.__validation_loss(criterion)
             log.info(f"Epoch {epoch}: train loss - {train_loss / len(self.train):.4f}, validation loss - {val_loss:.4f}, lr - {scheduler.get_last_lr()[0]:.6f}")
             if val_loss < min_loss:
                 torch.save(self.__state_dict(), self.model_storage / f'{self.config.name}.pt')
