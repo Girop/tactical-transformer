@@ -1,0 +1,12 @@
+{
+    "name": "best-only-par2-15k",
+    "epochs": 12,
+    "train_size": 15000,
+    "test_size": 1000,
+    "seed": 40,
+    "lr": 0.0003,
+    "decay": 0.01,
+    "train_logics": [],
+    "test_logics": [],
+    "loss": "par2"
+}

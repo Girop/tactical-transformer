@@ -1,11 +1,12 @@
 {
     "name": "dev",
     "epochs": 8,
-    "train_size": 5000,
-    "test_size": 250,
+    "train_size": 100,
+    "test_size": 50,
     "seed": 40,
     "lr": 3e-4,
     "decay": 0.01,
     "train_logics": [],
-    "test_logics": []
+    "test_logics": [],
+    "loss": "par2"
 }

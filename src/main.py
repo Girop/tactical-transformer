@@ -5,8 +5,9 @@ warnings.filterwarnings("ignore", category=FutureWarning)
 
 from dataloader import Data
 from pathlib import Path
-from transformer import TacticTransformer, ModelConfig
+from transformer import ModelConfig, build_model
 import argparse
+from torch import nn
 from z3alpha.config import setup_logging
 import logging
 from train import Trainer
@@ -28,8 +29,8 @@ def get_args() -> argparse.Namespace:
     return arg.parse_args()
 
 
-def load_model(config: ModelConfig, name: str) -> TacticTransformer:
-    model = TacticTransformer(config)
+def load_model(config: ModelConfig, name: str, architecture: str = "enc-dec") -> nn.Module:
+    model = build_model(config, architecture)
     model.load_state_dict(torch.load(f'models/{name}.pt', weights_only=True))
     model.eval()
     return model
@@ -54,12 +55,12 @@ def main():
     test_loader = loader.test_split(experiment.test_size, excluded, experiment.test_logics)
     log.info(f"Loaded samples: {len(train.dataset)} train, {len(val.dataset)} validation, {len(test_loader.dataset)} test")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = TacticTransformer(model_config).to(device)
+    model = build_model(model_config, experiment.architecture).to(device)
     if args.compile:
         model = torch.compile(model)
     if not args.skip_train:
         Trainer(model, train, val, experiment).execute()
-    model = load_model(model_config, experiment.name).to(device)
+    model = load_model(model_config, experiment.name, experiment.architecture).to(device)
     test(model, test_loader, args.z3, model_config, experiment)
 
 

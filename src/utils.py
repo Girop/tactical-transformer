@@ -45,6 +45,7 @@ class ExperimentConfig:
     test_logics: list[str]
     loss: str
     gin_model: str = "matched"
+    architecture: str = "enc-dec"  # "enc-dec" | "decoder-only"
     # Training
     label_smoothing: float = 0.0
     scheduler: str = "cosine"

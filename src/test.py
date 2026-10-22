@@ -6,7 +6,8 @@ import logging
 from tqdm import tqdm
 from pathlib import Path
 from utils import ExperimentConfig
-from transformer import ModelConfig, TacticTransformer
+from transformer import ModelConfig
+from torch import nn
 from tactics import CATALOG
 from z3alpha.evaluator import SolverRunner
 import json
@@ -83,7 +84,7 @@ class TestResults:
         path.write_text(json.dumps(data, indent=2))
 
 
-def generate_strategies(model: TacticTransformer, data: DataLoader) -> list[tuple[Path, str]]:
+def generate_strategies(model: nn.Module, data: DataLoader) -> list[tuple[Path, str]]:
     device = model.device
     strats = []
     for smt, _, bench in tqdm(data, desc="Generating"):
@@ -125,7 +126,7 @@ def run_solver_on_benchmarks(benchmarks: list[tuple[Path, str]], z3path: Path | 
     return results
 
 
-def run_test(model: TacticTransformer, test: DataLoader, z3path: Path | str, timeout: float = 10.0) -> TestResults:
+def run_test(model: nn.Module, test: DataLoader, z3path: Path | str, timeout: float = 10.0) -> TestResults:
     baseline = test.dataset.bench_data
     assert len(baseline) == len(set(b.benchmark for b in baseline))
     strat_bench = generate_strategies(model, test)
@@ -133,7 +134,7 @@ def run_test(model: TacticTransformer, test: DataLoader, z3path: Path | str, tim
     return TestResults.from_benchmarks(model_results, baseline, timeout)
 
 
-def test(model: TacticTransformer, test: DataLoader, z3: Path, model_config, experiment):
+def test(model: nn.Module, test: DataLoader, z3: Path, model_config, experiment):
     results = run_test(model, test, z3)
     results.display()
     out_dir = Path("experiments")

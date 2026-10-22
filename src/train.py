@@ -1,7 +1,6 @@
 import logging
 
 from pathlib import Path
-from transformer import TacticTransformer
 from math import inf
 from torch.utils.data import DataLoader
 import torch
@@ -41,7 +40,7 @@ class Trainer:
 
     def __init__(
         self,
-        model: TacticTransformer,
+        model: nn.Module,
         train: DataLoader,
         validation: DataLoader,
         config: ExperimentConfig,

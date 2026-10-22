@@ -1,0 +1,14 @@
+{
+    "name": "dec-only-single",
+    "epochs": 12,
+    "train_size": 5000,
+    "test_size": 1000,
+    "seed": 40,
+    "lr": 3e-4,
+    "decay": 0.01,
+    "train_logics": ["QF_LIA", "QF_NIA", "QF_NRA"],
+    "test_logics": ["QF_LIA", "QF_NIA", "QF_NRA"],
+    "loss": "par2",
+    "gin_model": "QF_NRA",
+    "architecture": "decoder-only"
+}

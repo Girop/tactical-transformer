@@ -1,0 +1,46 @@
+{
+  "model": "ModelConfig(vocab_size=33, input_dimension=64, model_dimension=768, max_strat_len=101, attention_heads=8, layers=12, feedforward=2048)",
+  "experiment": "ExperimentConfig(name='best-only-ce-15k', epochs=12, train_size=15000, test_size=1000, lr=0.0003, seed=40, decay=0.01, train_logics=[], test_logics=[], loss='ce', data_selection='best')",
+  "overall": {
+    "logic": "Overall",
+    "model_sr": 0.741,
+    "baseline_sr": 0.855,
+    "model_par2": 5.829692213058472,
+    "baseline_par2": 3.5964672830104827,
+    "n": 1000
+  },
+  "per_logic": [
+    {
+      "logic": "QF_BV",
+      "model_sr": 0.49056603773584906,
+      "baseline_sr": 0.8018867924528302,
+      "model_par2": 11.103572379867986,
+      "baseline_par2": 5.180555989907223,
+      "n": 318
+    },
+    {
+      "logic": "QF_LIA",
+      "model_sr": 0.8536082474226804,
+      "baseline_sr": 0.8474226804123711,
+      "model_par2": 3.581794208349641,
+      "baseline_par2": 3.6161927586978244,
+      "n": 485
+    },
+    {
+      "logic": "QF_NIA",
+      "model_sr": 0.8863636363636364,
+      "baseline_sr": 0.9659090909090909,
+      "model_par2": 2.622599791396748,
+      "baseline_par2": 0.973759496753866,
+      "n": 88
+    },
+    {
+      "logic": "QF_NRA",
+      "model_sr": 0.8532110091743119,
+      "baseline_sr": 0.9541284403669725,
+      "model_par2": 3.0348369134675472,
+      "baseline_par2": 1.004643619607348,
+      "n": 109
+    }
+  ]
+}
