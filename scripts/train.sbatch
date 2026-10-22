@@ -13,4 +13,4 @@ source "${VENV:-venv}/bin/activate"
 command -v z3 >/dev/null || { echo "z3 binary not found in PATH" >&2; exit 1; }
 export PYTHONUNBUFFERED=1
 nvidia-smi -L
-python src/main.py --data experiments/train "$@"
+python src/main.py "$@"

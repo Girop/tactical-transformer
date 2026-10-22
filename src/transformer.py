@@ -1,7 +1,9 @@
+from __future__ import annotations
 from torch import nn
 import torch
 from dataclasses import dataclass
-from tactics import SpecialTacticsTokens
+from tactics import SpecialTacticsTokens, CATALOG
+from smt_embed import GIN_DIM
 
 
 @dataclass(frozen=True)
@@ -13,6 +15,18 @@ class ModelConfig:
     attention_heads: int
     layers: int
     feedforward: int
+
+    @classmethod
+    def default(cls):
+        return cls(
+            vocab_size=CATALOG.vocab_size(),
+            input_dimension=GIN_DIM,
+            model_dimension=768,
+            max_strat_len=101,
+            attention_heads=8,
+            layers=12,
+            feedforward=2048,
+        )
 
 
 def causal_mask(size: int, device: torch.device) -> torch.Tensor:
@@ -59,7 +73,7 @@ class TacticTransformer(nn.Module):
         src = self._encode_src(smt)
         tgt = self._embed(tgt_ids, self.tgt_embedding, self.tgt_pos_embedding)
 
-        tgt_key_padding_mask = tgt_ids == SpecialTacticsTokens.PAD_ID
+        tgt_key_padding_mask = tgt_ids == SpecialTacticsTokens.PAD_ID.value
 
         x = self.transformer(
             src,
@@ -69,28 +83,29 @@ class TacticTransformer(nn.Module):
         )
         return self.out_projection(x)
 
+    def _decode_step(self, ys: torch.Tensor, memory: torch.Tensor) -> torch.Tensor:
+        """Single decoder step, returns logits for the last position. [B, vocab_size]"""
+        tgt = self._embed(ys, self.tgt_embedding, self.tgt_pos_embedding)
+        out = self.transformer.decoder(
+            tgt, memory,
+            tgt_mask=causal_mask(ys.size(1), ys.device),
+        )
+        return self.out_projection(out[:, -1])
+
     @torch.no_grad()
     def generate(self, smt: torch.Tensor) -> torch.Tensor:
         """Greedy decode: one tactic id at a time, until every row has emitted EOS."""
         self.eval()
         batch = smt.size(0)
-
         memory = self.transformer.encoder(self._encode_src(smt))
 
         ys = torch.full((batch, 1), SpecialTacticsTokens.BOS_ID, dtype=torch.long, device=smt.device)
         finished = torch.zeros(batch, dtype=torch.bool, device=smt.device)
         for _ in range(self.config.max_strat_len - 1):
-            tgt = self._embed(ys, self.tgt_embedding, self.tgt_pos_embedding)
-            out = self.transformer.decoder(
-                tgt, memory,
-                tgt_mask=causal_mask(ys.size(1), ys.device),
-            )
-            next_ids = self.out_projection(out[:, -1]).argmax(dim=-1)
-            # Rows that already emitted EOS only get padding, so nothing after EOS reaches the strategy.
+            next_ids = self._decode_step(ys, memory).argmax(dim=-1)
             next_ids = next_ids.masked_fill(finished, SpecialTacticsTokens.PAD_ID)
             ys = torch.cat([ys, next_ids.unsqueeze(1)], dim=1)
             finished |= next_ids == SpecialTacticsTokens.EOS_ID
             if finished.all():
                 break
         return ys
-

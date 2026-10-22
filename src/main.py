@@ -1,3 +1,4 @@
+from __future__ import annotations
 import warnings
 
 warnings.filterwarnings("ignore", category=FutureWarning)
@@ -8,24 +9,19 @@ from transformer import TacticTransformer, ModelConfig
 from z3alpha.evaluator import SolverRunner
 from tqdm import tqdm
 import argparse
-from tactics import SpecialTacticsTokens, CATALOG
-from smt_embed import GIN_DIM
-from pydantic import TypeAdapter
+from tactics import CATALOG
 from pydantic.dataclasses import dataclass
 from dataclasses import asdict
 from collections import defaultdict
 from z3alpha.config import setup_logging
 import logging
-from math import inf
+from train import Trainer
+from utils import seed_everything, ExperimentConfig
+import json
+from torch.utils.data import DataLoader
+import torch
 
 log = logging.getLogger(__name__)
-from utils import seed_everything
-import json
-
-from torch.utils.data import DataLoader
-import torch.nn.functional as F
-import torch
-import torch.nn as nn
 
 
 def get_args() -> argparse.Namespace:
@@ -39,142 +35,46 @@ def get_args() -> argparse.Namespace:
     return arg.parse_args()
 
 
-@dataclass(frozen=True)
-class ExperimentConfig:
-    name: str
-    epochs: int
-    train_size: int
-    test_size: int
-    lr: float
-    seed: int
-    decay: float
-    train_logics: list[str]
-    test_logics: list[str]
-    loss: str
-
-    @classmethod
-    def from_json(cls, config_path: Path) -> ExperimentConfig:
-        assert config_path.is_file(), "Experiment config file required"
-        return TypeAdapter(cls).validate_json(config_path.read_text())
-
-
 def generate_strategies(model: TacticTransformer, data: DataLoader) -> list[tuple[Path, str]]:
     device = model.device
     strats = []
     for smt, _, bench in tqdm(data, desc="Generating"):
         ids = model.generate(smt.to(device)).tolist()
-        strategies = [CATALOG.tactics_to_text(id_) for id_ in ids]
-        strats.extend([(b.benchmark, s) for b, s in zip(bench, strategies)])
+        strats.extend((b.benchmark, CATALOG.tactics_to_text(id_)) for b, id_ in zip(bench, ids))
     return strats
 
 
 # Cache by: (benchmark, strategy, timeout), values: (status, runtime)
 def run_solver_on_benchmarks(benchmarks: list[tuple[Path, str]], z3path: Path | str, timeout=10.0, cache: Path = Path("data/benchmark_cache")) -> list[Benchmark]:
     cache.mkdir(exist_ok=True)
-    cache_file = cache / "results.json"
-    store: dict = json.loads(cache_file.read_text()) if cache_file.exists() else {}
+    cache_file = cache / "results.jsonl"
+
+    store: dict = {}
+    if cache_file.exists():
+        for line in cache_file.read_text().splitlines():
+            if line:
+                entry = json.loads(line)
+                store[entry["key"]] = {"status": entry["status"], "runtime": entry["runtime"]}
 
     results = []
-    for idx, (bench_path, strategy) in enumerate(tqdm(benchmarks, desc="Testing")):
-        key = f"{bench_path}|{strategy}|{timeout}"
-        if key in store:
-            status, runtime = store[key]["status"], store[key]["runtime"]
-        else:
-            _, status, runtime, _ = SolverRunner(
-                z3path,
-                str(bench_path),
-                timeout,
-                run_id=idx,
-                z3_strategy=strategy
-            ).execute()
-            store[key] = {"status": status, "runtime": runtime}
-            cache_file.write_text(json.dumps(store, indent=2))
-        results.append(Benchmark(strategy, bench_path, Status[status], float(runtime), status in ("sat", "unsat")))
+    with cache_file.open("a") as f:
+        for idx, (bench_path, strategy) in enumerate(tqdm(benchmarks, desc="Testing")):
+            key = f"{bench_path}|{strategy}|{timeout}"
+            if key in store:
+                status, runtime = store[key]["status"], store[key]["runtime"]
+            else:
+                _, status, runtime, _ = SolverRunner(
+                    z3path,
+                    str(bench_path),
+                    timeout,
+                    run_id=idx,
+                    z3_strategy=strategy
+                ).execute()
+                store[key] = {"status": status, "runtime": runtime}
+                f.write(json.dumps({"key": key, "status": status, "runtime": runtime}) + "\n")
+                f.flush()
+            results.append(Benchmark(strategy, bench_path, Status[status], float(runtime), status in ("sat", "unsat")))
     return results
-
-
-@torch.no_grad()
-def mean_loss(model: TacticTransformer, loader: DataLoader) -> float:
-    model.eval()
-    total = 0.0
-    count = 0
-    for smt, strat, _ in loader:
-        smt, strat = smt.to(model.device), strat.to(model.device)
-        logits = model(smt, strat[:, :-1])
-        bs = smt.size(0)
-        total += F.cross_entropy(logits.transpose(1, 2), strat[:, 1:],
-                                 ignore_index=SpecialTacticsTokens.PAD_ID).item() * bs
-        count += bs
-    return total / count
-
-
-class Par2Loss(nn.Module):
-    def __init__(self, timeout: float, pad_id: int):
-        super().__init__()
-        self.timeout = timeout
-        self.ce = nn.CrossEntropyLoss(ignore_index=pad_id, reduction='none')
-
-    def forward(self, logits: torch.Tensor, targets: torch.Tensor, benchmarks: list) -> torch.Tensor:
-        per_sample = self.ce(logits.transpose(1, 2), targets).mean(dim=1)
-        weights = torch.tensor([1.0 - b.time_s / self.timeout if b.solved else 0.0 for b in benchmarks], device=logits.device)
-        return (per_sample * weights).mean()
-
-
-class CELoss(nn.Module):
-    def __init__(self, pad_id: int):
-        super().__init__()
-        self.ce = nn.CrossEntropyLoss(ignore_index=pad_id)
-
-    def forward(self, logits: torch.Tensor, targets: torch.Tensor, benchmarks: list) -> torch.Tensor:
-        return self.ce(logits.transpose(1, 2), targets)
-
-
-LOSS_FUNCTIONS = {
-    "par2": lambda timeout, pad_id: Par2Loss(timeout, pad_id),
-    "ce": lambda timeout, pad_id: CELoss(pad_id),
-}
-
-
-def train_model(model: TacticTransformer, train: DataLoader, validation: DataLoader, config: ExperimentConfig, timeout: float = 10.0):
-    Path("models").mkdir(exist_ok=True)
-    device = model.device
-    opt = torch.optim.AdamW(model.parameters(), lr=config.lr, weight_decay=config.decay)
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=config.epochs)
-    assert config.loss in LOSS_FUNCTIONS, f"Unknown loss: {config.loss}, expected one of {list(LOSS_FUNCTIONS)}"
-    criterion = LOSS_FUNCTIONS[config.loss](timeout, SpecialTacticsTokens.PAD_ID)
-    min_loss = inf
-    for epoch in range(config.epochs):
-        model.train()
-        train_loss = 0.0
-        for smt, strat, bench in tqdm(train, desc=f"Epoch {epoch}"):
-            opt.zero_grad()
-            smt, strat = smt.to(device), strat.to(device)
-            logits = model(smt, strat[:, :-1])
-            loss = criterion(logits, strat[:, 1:], bench)
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            opt.step()
-            train_loss += loss.item()
-
-        val_loss = mean_loss(model, validation)
-        scheduler.step()
-        log.info(f"Epoch {epoch}: train loss - {train_loss / len(train):.4f}, validation loss - {val_loss:.4f}, lr - {scheduler.get_last_lr()[0]:.6f}")
-        if val_loss < min_loss: # TODO nice metric would come in handy...
-            torch.save(model.state_dict(), f'models/epoch-{epoch}-{config.name}.pt')
-            min_loss = val_loss
-    torch.save(model.state_dict(), f'models/{config.name}.pt')
-
-
-def make_config():
-    return ModelConfig(
-        vocab_size=CATALOG.vocab_size(),
-        input_dimension=GIN_DIM,
-        model_dimension=768,
-        max_strat_len=101,
-        attention_heads=8,
-        layers=12,
-        feedforward=2048,
-    )
 
 
 def par2(time_s: float, solved: bool, timeout: float) -> float:
@@ -269,25 +169,26 @@ def main():
     experiment = ExperimentConfig.from_json(args.experiment)
     log.info(f"Training model: {experiment.name}")
     seed_everything(experiment.seed)
-    model_config = make_config()
+    model_config = ModelConfig.default()
     excluded = exclusion_set(args.excluded)
     log.info("Loading train data...")
     loader = Data(args.data, model_config)
-    train, val = loader.train_splits(experiment.train_size, 0.15, excluded, experiment.train_logics)
+    train, val = loader.train_splits(experiment.train_size, 0.15, excluded, experiment.train_logics, experiment.data_selection)
     log.info("Loading test data...")
     test = loader.test_split(experiment.test_size, excluded, experiment.test_logics)
     log.info(f"Loaded samples: {len(train.dataset)} train, {len(val.dataset)} validation, {len(test.dataset)} test")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = TacticTransformer(model_config).to(device)
     if args.compile:
-        # TODO Doesn't work
         model = torch.compile(model)
     if not args.skip_train:
-        train_model(model, train, val, experiment)
+        Trainer(model, train, val, experiment).execute()
     model = load_model(model_config, experiment.name).to(device)
     results = run_test(model, test, args.z3)
     results.display()
-    results.to_json(Path(f"experiment-{experiment.name}-out.json"), model_config, experiment)
+    out_dir = Path("experiments")
+    out_dir.mkdir(exist_ok=True)
+    results.to_json(out_dir / f"{experiment.name}-out.json", model_config, experiment)
 
 
 if __name__ == '__main__':
