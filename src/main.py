@@ -48,7 +48,7 @@ def main():
     model_config = ModelConfig.default()
     excluded = testing_set(args.excluded)
     log.info("Loading train data...")
-    loader = Data(args.data, model_config)
+    loader = Data(args.data, model_config, gin_model=experiment.gin_model)
     train, val = loader.train_splits(experiment.train_size, 0.15, excluded, experiment.train_logics)
     log.info("Loading test data...")
     test_loader = loader.test_split(experiment.test_size, excluded, experiment.test_logics)

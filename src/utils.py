@@ -44,6 +44,7 @@ class ExperimentConfig:
     train_logics: list[str]
     test_logics: list[str]
     loss: str
+    gin_model: str = "matched"
     # Training
     label_smoothing: float = 0.0
     scheduler: str = "cosine"

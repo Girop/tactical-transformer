@@ -102,12 +102,12 @@ class TacticExample(Dataset):
 
 class Data:
 
-    def __init__(self, allcsv: Path, config: ModelConfig, batch_size: int = 16, timeout: float = 10.0):
+    def __init__(self, allcsv: Path, config: ModelConfig, batch_size: int = 16, timeout: float = 10.0, gin_model: str = "matched"):
         assert allcsv.is_file(), 'Expected single all.csv file'
         self.allcsv = allcsv
         self.config = config
         self.batch_size = batch_size
-        self.embedder = GINEmbedder()
+        self.embedder = GINEmbedder(gin_model=gin_model)
         self.timeout = timeout
 
     def __load_examples(self, should_skip: Callable) -> list[Benchmark]:
