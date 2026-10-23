@@ -29,8 +29,8 @@ def get_args() -> argparse.Namespace:
     return arg.parse_args()
 
 
-def load_model(config: ModelConfig, name: str, architecture: str = "enc-dec") -> nn.Module:
-    model = build_model(config, architecture)
+def load_model(config: ModelConfig, name: str) -> nn.Module:
+    model = build_model(config)
     model.load_state_dict(torch.load(f'models/{name}.pt', weights_only=True))
     model.eval()
     return model
@@ -46,7 +46,7 @@ def main():
     experiment = ExperimentConfig.from_json(args.experiment)
     log.info(f"Training model: {experiment.name}")
     seed_everything(experiment.seed)
-    model_config = ModelConfig.default()
+    model_config = ModelConfig.default(architecture=experiment.architecture)
     excluded = testing_set(args.excluded)
     log.info("Loading train data...")
     loader = Data(args.data, model_config, gin_model=experiment.gin_model)
@@ -55,12 +55,12 @@ def main():
     test_loader = loader.test_split(experiment.test_size, excluded, experiment.test_logics)
     log.info(f"Loaded samples: {len(train.dataset)} train, {len(val.dataset)} validation, {len(test_loader.dataset)} test")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = build_model(model_config, experiment.architecture).to(device)
+    model = build_model(model_config).to(device)
     if args.compile:
         model = torch.compile(model)
     if not args.skip_train:
         Trainer(model, train, val, experiment).execute()
-    model = load_model(model_config, experiment.name, experiment.architecture).to(device)
+    model = load_model(model_config, experiment.name).to(device)
     test(model, test_loader, args.z3, model_config, experiment)
 
 

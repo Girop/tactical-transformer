@@ -4,6 +4,7 @@ import torch
 from dataclasses import dataclass
 from tactics import SpecialTacticsTokens, CATALOG
 from smt_embed import GIN_DIM
+from abc import ABC, abstractmethod
 
 
 @dataclass(frozen=True)
@@ -15,9 +16,10 @@ class ModelConfig:
     attention_heads: int
     layers: int
     feedforward: int
+    architecture: str = "enc-dec"  # "enc-dec" | "dec"
 
     @classmethod
-    def default(cls):
+    def default(cls, architecture: str):
         return cls(
             vocab_size=CATALOG.vocab_size(),
             input_dimension=GIN_DIM,
@@ -26,6 +28,7 @@ class ModelConfig:
             attention_heads=8,
             layers=12,
             feedforward=2048,
+            architecture=architecture,
         )
 
 
@@ -33,7 +36,44 @@ def causal_mask(size: int, device: torch.device) -> torch.Tensor:
     return torch.triu(torch.ones(size, size, dtype=torch.bool, device=device), diagonal=1)
 
 
-class TacticTransformer(nn.Module):
+class TacticGenerator(ABC, nn.Module):
+    config: ModelConfig
+
+    @property
+    @abstractmethod
+    def device(self) -> torch.device:
+        ...
+
+    @abstractmethod
+    def _encode(self, smt: torch.Tensor) -> torch.Tensor:
+        """Build the initial `memory` passed to `_decode_step` at every generation step."""
+        ...
+
+    @abstractmethod
+    def _decode_step(self, ys: torch.Tensor, memory: torch.Tensor) -> torch.Tensor:
+        """Single decoder step, returns logits for the last position. [B, vocab_size]"""
+        ...
+
+    @torch.no_grad()
+    def generate(self, smt: torch.Tensor) -> torch.Tensor:
+        """Greedy decode: one tactic id at a time, until every row has emitted EOS."""
+        self.eval()
+        batch = smt.size(0)
+        memory = self._encode(smt)
+
+        ys = torch.full((batch, 1), SpecialTacticsTokens.BOS_ID, dtype=torch.long, device=smt.device)
+        finished = torch.zeros(batch, dtype=torch.bool, device=smt.device)
+        for _ in range(self.config.max_strat_len - 1):
+            next_ids = self._decode_step(ys, memory).argmax(dim=-1)
+            next_ids = next_ids.masked_fill(finished, SpecialTacticsTokens.PAD_ID)
+            ys = torch.cat([ys, next_ids.unsqueeze(1)], dim=1)
+            finished |= next_ids == SpecialTacticsTokens.EOS_ID
+            if finished.all():
+                break
+        return ys
+
+
+class TacticTransformer(TacticGenerator):
     def __init__(self, config: ModelConfig) -> None:
         super().__init__()
         self.config = config
@@ -63,11 +103,12 @@ class TacticTransformer(nn.Module):
         pos = torch.arange(ids.size(1), device=ids.device)
         return tok_emb(ids) + pos_emb(pos)
 
-
     def _encode_src(self, smt: torch.Tensor) -> torch.Tensor:
         """The source is a single token, the GIN embedding: [B, input_dimension] -> [B, 1, model_dimension]."""
         return self.src_projection(smt).unsqueeze(1)
 
+    def _encode(self, smt: torch.Tensor) -> torch.Tensor:
+        return self.transformer.encoder(self._encode_src(smt))
 
     def forward(self, smt: torch.Tensor, tgt_ids: torch.Tensor):
         src = self._encode_src(smt)
@@ -92,26 +133,8 @@ class TacticTransformer(nn.Module):
         )
         return self.out_projection(out[:, -1])
 
-    @torch.no_grad()
-    def generate(self, smt: torch.Tensor) -> torch.Tensor:
-        """Greedy decode: one tactic id at a time, until every row has emitted EOS."""
-        self.eval()
-        batch = smt.size(0)
-        memory = self.transformer.encoder(self._encode_src(smt))
 
-        ys = torch.full((batch, 1), SpecialTacticsTokens.BOS_ID, dtype=torch.long, device=smt.device)
-        finished = torch.zeros(batch, dtype=torch.bool, device=smt.device)
-        for _ in range(self.config.max_strat_len - 1):
-            next_ids = self._decode_step(ys, memory).argmax(dim=-1)
-            next_ids = next_ids.masked_fill(finished, SpecialTacticsTokens.PAD_ID)
-            ys = torch.cat([ys, next_ids.unsqueeze(1)], dim=1)
-            finished |= next_ids == SpecialTacticsTokens.EOS_ID
-            if finished.all():
-                break
-        return ys
-
-
-class DecoderOnlyTacticTransformer(nn.Module):
+class DecoderOnlyTacticTransformer(TacticGenerator):
     """GIN prefix + causal decoder. The projected GIN embedding is prepended as
     position 0; tactic tokens follow at positions 1..seq_len."""
 
@@ -149,6 +172,9 @@ class DecoderOnlyTacticTransformer(nn.Module):
         dummy_memory = seq.new_zeros(seq.size(0), 0, seq.size(2))
         return self.decoder(seq, dummy_memory, tgt_mask=mask, tgt_key_padding_mask=pad_mask)
 
+    def _encode(self, smt: torch.Tensor) -> torch.Tensor:
+        return self._prefix(smt)
+
     def forward(self, smt: torch.Tensor, tgt_ids: torch.Tensor):
         prefix = self._prefix(smt)                          # [B, 1, d]
         tactic = self._tactic_embed(tgt_ids)                # [B, S, d]
@@ -164,35 +190,18 @@ class DecoderOnlyTacticTransformer(nn.Module):
         out = self._forward_seq(seq, mask, pad_mask)
         return self.out_projection(out[:, 1:])              # logits for tactic positions only
 
-    @torch.no_grad()
-    def generate(self, smt: torch.Tensor) -> torch.Tensor:
-        self.eval()
-        batch = smt.size(0)
-        prefix = self._prefix(smt)                          # [B, 1, d]
-
-        bos = torch.full((batch, 1), SpecialTacticsTokens.BOS_ID, dtype=torch.long, device=smt.device)
-        ys = bos
-        finished = torch.zeros(batch, dtype=torch.bool, device=smt.device)
-
-        for _ in range(self.config.max_strat_len - 1):
-            tactic = self._tactic_embed(ys)
-            seq = torch.cat([prefix, tactic], dim=1)
-            mask = causal_mask(seq.size(1), seq.device)
-            out = self._forward_seq(seq, mask)
-            logits = self.out_projection(out[:, -1])        # last position
-
-            next_ids = logits.argmax(dim=-1)
-            next_ids = next_ids.masked_fill(finished, SpecialTacticsTokens.PAD_ID)
-            ys = torch.cat([ys, next_ids.unsqueeze(1)], dim=1)
-            finished |= next_ids == SpecialTacticsTokens.EOS_ID
-            if finished.all():
-                break
-        return ys
+    def _decode_step(self, ys: torch.Tensor, memory: torch.Tensor) -> torch.Tensor:
+        """Single decoder step, returns logits for the last position. [B, vocab_size]"""
+        tactic = self._tactic_embed(ys)
+        seq = torch.cat([memory, tactic], dim=1)
+        mask = causal_mask(seq.size(1), seq.device)
+        out = self._forward_seq(seq, mask)
+        return self.out_projection(out[:, -1])
 
 
-def build_model(config: ModelConfig, architecture: str = "enc-dec") -> nn.Module:
-    if architecture == "decoder-only":
+def build_model(config: ModelConfig) -> nn.Module:
+    if config.architecture == "dec":
         return DecoderOnlyTacticTransformer(config)
-    if architecture == "enc-dec":
+    if config.architecture == "enc-dec":
         return TacticTransformer(config)
-    raise ValueError(f"Unknown architecture: {architecture}")
+    raise ValueError(f"Unknown architecture: {config.architecture}")
