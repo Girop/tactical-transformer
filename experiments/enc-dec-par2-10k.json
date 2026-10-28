@@ -1,0 +1,13 @@
+{
+    "name": "enc-dec-par2-10k",
+    "epochs": 12,
+    "train_size": 10000,
+    "test_size": 1000,
+    "lr": 0.0003,
+    "seed": 40,
+    "decay": 0.01,
+    "train_logics": ["QF_NIA"],
+    "test_logics": ["QF_NIA"],
+    "loss": "par2",
+    "architecture": "enc-dec"
+}
