@@ -1,19 +1,22 @@
 from __future__ import annotations
+
 import warnings
 
 warnings.filterwarnings("ignore", category=FutureWarning)
 
-from dataloader import Data
-from pathlib import Path
-from transformer import ModelConfig, build_model
 import argparse
-from torch import nn
-from z3alpha.config import setup_logging
 import logging
-from train import Trainer
-from utils import seed_everything, ExperimentConfig
-import torch
+from pathlib import Path
 from test import test
+
+import torch
+from torch import nn
+
+from dataloader import Data
+from train import Trainer
+from transformer import ModelConfig, build_model
+from utils import ExperimentConfig, seed_everything
+from z3alpha.config import setup_logging
 
 log = logging.getLogger(__name__)
 
@@ -46,7 +49,10 @@ def main():
     experiment = ExperimentConfig.from_json(args.experiment)
     log.info(f"Training model: {experiment.name}")
     seed_everything(experiment.seed)
-    model_config = ModelConfig.default(architecture=experiment.architecture)
+    model_config = ModelConfig.default(
+        architecture=experiment.architecture,
+        pretrained_model_name=experiment.pretrained_model_name,
+    )
     excluded = testing_set(args.excluded)
     log.info("Loading train data...")
     loader = Data(args.data, model_config, gin_model=experiment.gin_model)

@@ -7,12 +7,12 @@ from pathlib import Path
 
 import numpy as np
 import torch
-from torch_geometric.data import Batch
-
 from smt_select.models.graph.common import graph_dict_to_gin_data
 from smt_select.models.graph.selector import GraphSelector
 from smt_select.models.graph_text.selector import GIN_L2_EPS
-from smt_select.representations.graph_rep import _suppress_z3_destructor_noise, build_smt_graph_dict_timeout
+from smt_select.representations.graph_rep import (
+    _suppress_z3_destructor_noise, build_smt_graph_dict_timeout)
+from torch_geometric.data import Batch
 
 log = logging.getLogger(__name__)
 

@@ -1,11 +1,16 @@
 from __future__ import annotations
-import numpy as np
+
 import random
-import torch
 import time
 from pathlib import Path
+
+import numpy as np
+import torch
 from pydantic import TypeAdapter
 from pydantic.dataclasses import dataclass
+
+from smt_embed import GIN_DIM
+from tactics import CATALOG
 
 
 def seed_everything(seed):
@@ -45,12 +50,41 @@ class ExperimentConfig:
     test_logics: list[str]
     loss: str
     gin_model: str = "matched"
-    architecture: str = "enc-dec"  # "enc-dec" | "dec"
+    architecture: str = "enc-dec"  # "enc-dec" | "dec" | "llm-lora"
     label_smoothing: float = 0.0
     scheduler: str = "cosine"
     warmup_steps: int = 0
+    pretrained_model_name: str = "Qwen/Qwen2.5-0.5B"  # llm-lora only
 
     @classmethod
     def from_json(cls, config_path: Path) -> ExperimentConfig:
         assert config_path.is_file(), "Experiment config file required"
         return TypeAdapter(cls).validate_json(config_path.read_text())
+
+
+@dataclass(frozen=True)
+class ModelConfig:
+    vocab_size: int
+    input_dimension: int
+    model_dimension: int
+    max_strat_len: int
+    attention_heads: int
+    layers: int
+    feedforward: int
+    architecture: str = "enc-dec"  # "enc-dec" | "dec" | "llm-lora"
+    pretrained_model_name: str = "Qwen/Qwen2.5-0.5B"  # llm-lora only
+
+    @classmethod
+    def default(cls, architecture: str, **overrides):
+        return cls(
+            vocab_size=CATALOG.vocab_size(),
+            input_dimension=GIN_DIM,
+            model_dimension=768,
+            max_strat_len=101,
+            attention_heads=8,
+            layers=12,
+            feedforward=2048,
+            architecture=architecture,
+            **overrides,
+        )
+

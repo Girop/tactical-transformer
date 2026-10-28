@@ -1,21 +1,21 @@
-from dataclasses import dataclass
-from pathlib import Path
 import csv
 import warnings
-from enum import Enum, auto
 from collections import defaultdict
+from dataclasses import dataclass
+from enum import Enum, auto
+from pathlib import Path
 from random import shuffle
 from typing import Callable
-from tqdm import tqdm
-
-from transformer import SpecialTacticsTokens, ModelConfig
-from z3alpha.parser import parse_linear_strategy
-from smt_embed import GINEmbedder
-from tactics import CATALOG
 
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
+from tqdm import tqdm
+
+from smt_embed import GINEmbedder
+from tactics import CATALOG
+from transformer import ModelConfig, SpecialTacticsTokens
+from z3alpha.parser import parse_linear_strategy
 
 
 class Status(Enum):

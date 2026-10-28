@@ -1,19 +1,20 @@
 from __future__ import annotations
-from pydantic.dataclasses import dataclass
-from dataloader import Status, Benchmark
+
+import json
+import logging
 from collections import defaultdict
 from dataclasses import asdict
-import logging
-from tqdm import tqdm
 from pathlib import Path
-from utils import ExperimentConfig
-from transformer import ModelConfig, TacticGenerator
-from torch import nn
-from tactics import CATALOG
-from z3alpha.evaluator import SolverRunner
-import json
-from torch.utils.data import DataLoader
 
+from pydantic.dataclasses import dataclass
+from torch.utils.data import DataLoader
+from tqdm import tqdm
+
+from dataloader import Benchmark, Status
+from tactics import CATALOG
+from transformer import TacticGenerator
+from utils import ExperimentConfig, ModelConfig
+from z3alpha.evaluator import SolverRunner
 
 log = logging.getLogger(__name__)
 
@@ -142,7 +143,7 @@ def run_raw_baseline(benchmarks: list[Benchmark], z3path: Path | str, timeout: f
     return run_solver_on_benchmarks([(b.benchmark, None) for b in benchmarks], z3path, timeout)
 
 
-def run_test(model: nn.Module, test: DataLoader, z3path: Path | str, timeout: float = 10.0) -> TestResults:
+def run_test(model: TacticGenerator, test: DataLoader, z3path: Path | str, timeout: float = 10.0) -> TestResults:
     baseline = test.dataset.bench_data
     assert len(baseline) == len(set(b.benchmark for b in baseline))
     strat_bench = generate_strategies(model, test)
@@ -151,7 +152,7 @@ def run_test(model: nn.Module, test: DataLoader, z3path: Path | str, timeout: fl
     return TestResults.from_benchmarks(model_results, baseline, raw_results, timeout)
 
 
-def test(model: nn.Module, test: DataLoader, z3: Path, model_config, experiment):
+def test(model: TacticGenerator, test: DataLoader, z3: Path, model_config, experiment):
     results = run_test(model, test, z3)
     results.display()
     out_dir = Path("experiments")

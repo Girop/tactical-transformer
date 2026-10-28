@@ -1,5 +1,7 @@
 from enum import IntEnum
-from z3alpha.tactics.catalog import SOLVER_CATALOG, PREPROCESS_CATALOG, NAME_TO_ID
+
+from z3alpha.tactics.catalog import (NAME_TO_ID, PREPROCESS_CATALOG,
+                                     SOLVER_CATALOG)
 
 
 # The tactic ids from z3alpha are not densly packed, some ids correspond to nothing.

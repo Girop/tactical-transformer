@@ -21,8 +21,8 @@ import time
 from collections import Counter, defaultdict
 from pathlib import Path
 
-from z3alpha.config import setup_logging
 from utils import seed_everything
+from z3alpha.config import setup_logging
 from z3alpha.mcts import LinearStrategySearchRun
 from z3alpha.mcts.param_selection import ParamSelectionConfig
 from z3alpha.mcts.run import MctsConfig

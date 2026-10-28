@@ -1,35 +1,14 @@
 from __future__ import annotations
-from torch import nn
-import torch
-from dataclasses import dataclass
-from tactics import SpecialTacticsTokens, CATALOG
-from smt_embed import GIN_DIM
+
 from abc import ABC, abstractmethod
 
+import torch
+from peft import LoraConfig, TaskType, get_peft_model
+from torch import nn
+from transformers import AutoConfig, AutoModelForCausalLM
 
-@dataclass(frozen=True)
-class ModelConfig:
-    vocab_size: int
-    input_dimension: int
-    model_dimension: int
-    max_strat_len: int
-    attention_heads: int
-    layers: int
-    feedforward: int
-    architecture: str = "enc-dec"  # "enc-dec" | "dec"
-
-    @classmethod
-    def default(cls, architecture: str):
-        return cls(
-            vocab_size=CATALOG.vocab_size(),
-            input_dimension=GIN_DIM,
-            model_dimension=768,
-            max_strat_len=101,
-            attention_heads=8,
-            layers=12,
-            feedforward=2048,
-            architecture=architecture,
-        )
+from tactics import SpecialTacticsTokens
+from utils import ModelConfig
 
 
 def causal_mask(size: int, device: torch.device) -> torch.Tensor:
@@ -188,7 +167,7 @@ class DecoderOnlyTacticTransformer(TacticGenerator):
         pad_mask = torch.cat([tactic_pad.new_zeros(tactic_pad.size(0), 1), tactic_pad], dim=1)
 
         out = self._forward_seq(seq, mask, pad_mask)
-        return self.out_projection(out[:, 1:])              # logits for tactic positions only
+        return self.out_projection(out[:, 1:])
 
     def _decode_step(self, ys: torch.Tensor, memory: torch.Tensor) -> torch.Tensor:
         """Single decoder step, returns logits for the last position. [B, vocab_size]"""
@@ -199,9 +178,79 @@ class DecoderOnlyTacticTransformer(TacticGenerator):
         return self.out_projection(out[:, -1])
 
 
+class LoRATacticGenerator(TacticGenerator):
+
+    LORA_R = 16
+    LORA_ALPHA = 32
+    LORA_DROPOUT = 0.05
+    LORA_TARGET_MODULES = ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
+    LORA_MODULES_TO_SAVE = ["embed_tokens", "lm_head"]
+
+    def __init__(self, config: ModelConfig) -> None:
+        super().__init__()
+        self.config = config
+
+        hf_config = AutoConfig.from_pretrained(config.pretrained_model_name)
+        hf_config.tie_word_embeddings = False
+        # Match the new (float32) embedding/head/projection layers below; the checkpoint
+        # may default to bf16, and this codebase doesn't use mixed-precision training.
+        llm = AutoModelForCausalLM.from_pretrained(config.pretrained_model_name, config=hf_config, dtype=torch.float32)
+        self.model_dimension = llm.config.hidden_size
+
+        llm.set_input_embeddings(nn.Embedding(config.vocab_size, self.model_dimension))
+        llm.set_output_embeddings(nn.Linear(self.model_dimension, config.vocab_size, bias=False))
+
+        lora_config = LoraConfig(
+            task_type=TaskType.CAUSAL_LM,
+            r=self.LORA_R,
+            lora_alpha=self.LORA_ALPHA,
+            lora_dropout=self.LORA_DROPOUT,
+            target_modules=self.LORA_TARGET_MODULES,
+            modules_to_save=self.LORA_MODULES_TO_SAVE,
+        )
+        self.llm = get_peft_model(llm, lora_config)
+
+        self.src_projection = nn.Linear(config.input_dimension, self.model_dimension)
+
+    @property
+    def device(self) -> torch.device:
+        return next(self.llm.parameters()).device
+
+    def _tactic_embed(self, ids: torch.Tensor) -> torch.Tensor:
+        return self.llm.get_input_embeddings()(ids)
+
+    def _prefix(self, smt: torch.Tensor) -> torch.Tensor:
+        """[B, input_dim] -> [B, 1, model_dim]"""
+        return self.src_projection(smt).unsqueeze(1)
+
+    def _encode(self, smt: torch.Tensor) -> torch.Tensor:
+        return self._prefix(smt)
+
+    def forward(self, smt: torch.Tensor, tgt_ids: torch.Tensor):
+        prefix = self._prefix(smt)                          # [B, 1, d]
+        tactic = self._tactic_embed(tgt_ids)                # [B, S, d]
+        seq = torch.cat([prefix, tactic], dim=1)            # [B, 1+S, d]
+
+        # Padding mask: prefix is never padded. Causal masking is applied internally by the backbone.
+        attended = tgt_ids != SpecialTacticsTokens.PAD_ID.value
+        attention_mask = torch.cat([attended.new_ones(attended.size(0), 1), attended], dim=1)
+
+        out = self.llm(inputs_embeds=seq, attention_mask=attention_mask).logits
+        return out[:, 1:]
+
+    def _decode_step(self, ys: torch.Tensor, memory: torch.Tensor) -> torch.Tensor:
+        """Single decoder step, returns logits for the last position. [B, vocab_size]"""
+        tactic = self._tactic_embed(ys)
+        seq = torch.cat([memory, tactic], dim=1)
+        out = self.llm(inputs_embeds=seq).logits
+        return out[:, -1]
+
+
 def build_model(config: ModelConfig) -> nn.Module:
     if config.architecture == "dec":
         return DecoderOnlyTacticTransformer(config)
     if config.architecture == "enc-dec":
         return TacticTransformer(config)
+    if config.architecture == "llm-lora":
+        return LoRATacticGenerator(config)
     raise ValueError(f"Unknown architecture: {config.architecture}")

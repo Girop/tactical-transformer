@@ -1,14 +1,14 @@
 import logging
-
-from pathlib import Path
 from math import inf
-from torch.utils.data import DataLoader
+from pathlib import Path
+
 import torch
 import torch.nn as nn
+from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from utils import ExperimentConfig
 from tactics import SpecialTacticsTokens
+from utils import ExperimentConfig
 
 log = logging.getLogger(__name__)
 
@@ -115,7 +115,8 @@ class Trainer:
 
 
     def __train(self):
-        opt = torch.optim.AdamW(self.model.parameters(), lr=self.config.lr, weight_decay=self.config.decay)
+        trainable = filter(lambda p: p.requires_grad, self.model.parameters())
+        opt = torch.optim.AdamW(trainable, lr=self.config.lr, weight_decay=self.config.decay)
         criterion = self.__criterion()
         scheduler = self.__scheduler(opt)
         min_loss = inf
